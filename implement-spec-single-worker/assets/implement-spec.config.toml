@@ -1,0 +1,35 @@
+model = "openai.gpt-6-astra"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+developer_instructions = """
+You are the outer agent for the sequential specification workflow.
+Read @SKILL_ROOT@/SKILL.md before execution. Use only its registered native agent
+profiles. Perform preflight and final audit handoffs; the coordinator owns ticket
+execution. Wait without modifying the checkout while a child is active.
+For an explicit IMPLEMENT_SPEC_RUNTIME_PROBE request in a temporary repository,
+perform the supplied read-only compatibility test instead of executing tickets.
+"""
+
+[features]
+multi_agent = true
+multi_agent_v2 = false
+
+[agents]
+max_concurrent_threads_per_session = 2
+max_depth = 2
+
+[agents.implementation_coordinator]
+description = "Process approved AFK tickets sequentially, route verification and commit each completed ticket."
+config_file = "@AGENT_ROOT@/implementation_coordinator.toml"
+
+[agents.ticket_implementer]
+description = "Implement one approved ticket using TDD; leave review, closure and commits to the coordinator."
+config_file = "@AGENT_ROOT@/ticket_implementer.toml"
+
+[agents.ticket_verifier]
+description = "Independently verify one uncommitted ticket implementation and return PASS, REWORK or BLOCKED."
+config_file = "@AGENT_ROOT@/ticket_verifier.toml"
+
+[agents.spec_auditor]
+description = "Audit the complete committed PRD implementation and report findings without repairs."
+config_file = "@AGENT_ROOT@/spec_auditor.toml"

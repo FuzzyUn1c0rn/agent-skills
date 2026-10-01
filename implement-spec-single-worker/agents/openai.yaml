@@ -1,0 +1,6 @@
+interface:
+  display_name: "Sequential specification implementation"
+  short_description: "Implement AFK tickets sequentially with independent review"
+  default_prompt: "Use $implement-spec-single-worker to implement the approved PRD and its AFK tickets."
+policy:
+  allow_implicit_invocation: false

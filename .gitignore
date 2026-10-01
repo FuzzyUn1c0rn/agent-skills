@@ -1,0 +1,7 @@
+/*
+!/.gitignore
+!/implement-spec-single-worker/
+
+**/__pycache__/
+**/*.py[cod]
+/implement-spec-single-worker/references/runtime-evidence.json
