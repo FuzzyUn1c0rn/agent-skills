@@ -57,7 +57,7 @@ or rule, and the correction needed. Keep identifiers stable across attempts.
 
 ## Adjudication
 
-Only the outer Astra/high agent supplies this decision, with the coordinator
+Only the outer agent supplies this decision, with the coordinator
 idle and all leaves closed. Classify every current blocker, including findings
 that were not disputed. Keep the original verifier report intact.
 

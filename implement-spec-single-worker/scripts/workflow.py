@@ -12,6 +12,9 @@ import tomllib
 from contextlib import contextmanager
 from pathlib import Path
 
+import configuration
+import datetime
+
 
 class WorkflowError(RuntimeError):
     pass
@@ -655,15 +658,48 @@ def config_paths():
     home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     return [home / "implement-spec.config.toml"] + [
         home / "agents" / f"{role}.toml"
-        for role in ("implementation_coordinator", "ticket_implementer", "ticket_verifier", "spec_auditor")
+        for role in configuration.DEPTHS
     ]
 
 
 def config_fingerprint():
     digest = hashlib.sha256()
+    digest.update(json.dumps(configuration.expectations(), sort_keys=True).encode())
     for path in config_paths():
         digest.update(path.name.encode() + b"\0" + path.read_bytes())
     return digest.hexdigest()
+
+
+def verify_configuration():
+    expected = configuration.expectations()
+    for path in config_paths():
+        role = "outer" if path.name.endswith(".config.toml") else path.stem
+        installed = tomllib.loads(path.read_text())
+        if (installed.get("model"), installed.get("model_reasoning_effort")) != expected[role][:2]:
+            raise WorkflowError("Installed profiles differ from settings.toml. Run scripts/install.py.")
+
+
+def session_metadata(identifier):
+    if not identifier or not re.fullmatch(r"[A-Za-z0-9-]+", identifier):
+        raise WorkflowError("Missing or invalid Codex session identifier.")
+    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
+    for path in home.rglob(f"*{identifier}.jsonl"):
+        with path.open() as stream:
+            event = json.loads(next(stream))
+        if event.get("type") == "session_meta" and event["payload"].get("id") == identifier:
+            return event["payload"]
+    raise WorkflowError("No native session metadata for the requested coordinator.")
+
+
+def validate_coordinator(identifier, entry):
+    session = session_metadata(identifier)
+    source = session.get("source", {})
+    spawn = source.get("subagent", {}).get("thread_spawn", {}) if isinstance(source, dict) else {}
+    if (spawn.get("parent_thread_id") != entry["outer_session"]
+            or spawn.get("agent_role") != "implementation_coordinator"
+            or spawn.get("depth") != 1
+            or datetime.datetime.fromisoformat(session["timestamp"]).timestamp() < entry["admitted_at"]):
+        raise WorkflowError("Only a fresh named coordinator belonging to the admitted owner may mutate the run.")
 
 
 def runtime_version():
@@ -671,40 +707,69 @@ def runtime_version():
     return result.stdout.strip()
 
 
-def enforced_config_arguments():
+def enforced_config_arguments(include_outer_model=True):
+    verify_configuration()
     config = tomllib.loads(config_paths()[0].read_text())
     values = {
-        "model": config["model"], "model_reasoning_effort": config["model_reasoning_effort"],
-        "features.multi_agent": config["features"]["multi_agent"],
-        "features.multi_agent_v2": config["features"]["multi_agent_v2"],
         "agents.max_depth": config["agents"]["max_depth"],
-        "agents.max_concurrent_threads_per_session": config["agents"]["max_concurrent_threads_per_session"],
     }
+    if include_outer_model:
+        values.update(model=config["model"], model_reasoning_effort=config["model_reasoning_effort"])
     for path in config_paths()[1:]:
         values[f"agents.{path.stem}.config_file"] = str(path)
     return [part for key, value in values.items() for part in ("-c", f"{key}={json.dumps(value)}")]
 
 
-def verify_capability():
-    receipt_path = Path(__file__).resolve().parents[1] / "references" / "runtime-evidence.json"
-    if not receipt_path.exists():
-        raise WorkflowError("Runtime compatibility is unverified. Run scripts/smoke_test.py first.")
-    receipt = json.loads(receipt_path.read_text())
-    if (receipt.get("runtime") != runtime_version()
-            or receipt.get("config_fingerprint") != config_fingerprint()
-            or not all(receipt.get("checks", {}).get(name) is True for name in
-                       ("named_profiles", "effective_models", "nested_delegation",
-                        "second_worker_rejected", "workers_completed",
-                        "repair_lifecycle", "children_closed"))):
-        raise WorkflowError("Runtime or profiles differ from verified evidence. Repeat the isolated smoke test.")
-    return receipt
+def configuration_status():
+    verify_configuration()
+    return {
+        "runtime": runtime_version(),
+        "config_fingerprint": config_fingerprint(),
+        "checks": {"installed_models": True},
+        "scope": "Local configuration only. No agents or model calls are started.",
+    }
+
+
+def verify_checkout_entry(repo, spec):
+    locked = False
+    try:
+        with exclusive(git_home(repo) / "launch.lock"):
+            pass
+    except WorkflowError:
+        locked = True
+    if not locked:
+        raise WorkflowError("No active checkout lock. Start the workflow entry before changing run state.")
+    path = git_home(repo) / "entry.json"
+    if path.exists():
+        entry = json.loads(path.read_text())
+        if (entry.get("phase") != "admitted" or entry.get("release")
+                or entry.get("spec") != spec
+                or entry.get("branch") != git(repo, "branch", "--show-current")
+                or entry.get("runtime") != runtime_version()
+                or entry.get("config_fingerprint") != config_fingerprint()):
+            raise WorkflowError("Current-session admission is missing or stale. Stop before ticket work.")
+        verify_configuration()
+        caller = os.environ.get("CODEX_THREAD_ID")
+        if not caller or caller not in {entry["outer_session"], entry.get("coordinator")}:
+            raise WorkflowError("Caller is not the admitted owner or its registered coordinator.")
+        if caller != entry["outer_session"]:
+            validate_coordinator(caller, entry)
+    elif os.environ.get("IMPLEMENT_SPEC_LAUNCH") == "1":
+        verify_configuration()
+    else:
+        raise WorkflowError("Checkout lock is not attached to this workflow entry.")
 
 
 def launch(repo, spec, branch=None, resume=False):
-    verify_capability()
+    verify_configuration()
     with exclusive(git_home(repo) / "launch.lock") as descriptor:
+        if (git_home(repo) / "entry.json").exists():
+            raise WorkflowError("An interrupted current-session entry needs entry.py recover before launching.")
         command = ["codex", "--no-daemon", "--profile", "implement-spec", "--approve-for-me", "-C", str(repo)]
         command.extend(enforced_config_arguments())
+        attached = ("You are already the outer session opened by the dedicated launcher. "
+                    "The parent holds the checkout lock; IMPLEMENT_SPEC_LAUNCH=1. "
+                    "Do not run entry.py start or launch another outer. ")
         if resume:
             if branch and branch != git(repo, "branch", "--show-current"):
                 existing = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
@@ -718,16 +783,17 @@ def launch(repo, spec, branch=None, resume=False):
                 raise WorkflowError("Requested branch conflicts with the saved run.")
             if git(repo, "branch", "--show-current") != run.data["branch"]:
                 raise WorkflowError("Check out the saved run branch before resuming; no changes were moved.")
-            prompt = "Resume the approved $implement-spec-single-worker workflow. Reconcile state and confirm old workers are inactive before continuing. " + json.dumps({"spec": spec})
+            prompt = attached + "Resume the approved $implement-spec-single-worker workflow. Reconcile state and confirm old workers are inactive before continuing. " + json.dumps({"spec": spec})
             command.extend(["resume", run.data["outer_session"], prompt])
         else:
             selected = choose_branch(repo, spec, branch)
             run = Run(repo, spec)
             if run.data:
                 raise WorkflowError("Run already exists on this branch. Use launch --resume.")
-            prompt = "Use $implement-spec-single-worker to execute the approved AFK workflow. Read the skill before acting. " + json.dumps({"spec": spec, "branch": selected})
+            prompt = attached + "Use $implement-spec-single-worker to execute the approved AFK workflow. Read the skill before acting. " + json.dumps({"spec": spec, "branch": selected})
             command.append(prompt)
-        return subprocess.call(command, pass_fds=(descriptor,))
+        return subprocess.call(command, pass_fds=(descriptor,),
+                               env=dict(os.environ, IMPLEMENT_SPEC_LAUNCH="1"))
 
 
 def main():
@@ -748,7 +814,7 @@ def main():
     arguments = parser.parse_args()
     try:
         if arguments.action == "doctor":
-            print(json.dumps(verify_capability(), indent=2))
+            print(json.dumps(configuration_status(), indent=2))
             return 0
         repo = Path(git(arguments.repo, "rev-parse", "--show-toplevel"))
         if not arguments.spec:
@@ -756,7 +822,8 @@ def main():
         if arguments.action == "launch":
             return launch(repo, arguments.spec, arguments.branch, arguments.resume)
         if arguments.action == "prepare":
-            verify_capability()
+            verify_checkout_entry(repo, arguments.spec)
+            verify_configuration()
             print(choose_branch(repo, arguments.spec, arguments.branch))
             return 0
         run = Run(repo, arguments.spec)
@@ -764,6 +831,7 @@ def main():
             value = snapshot(repo, [run.record]) if arguments.action == "snapshot" else run.data
             print(json.dumps(value, indent=2))
             return 0
+        verify_checkout_entry(repo, arguments.spec)
         with exclusive(git_home(repo) / "state.lock"):
             run = Run(repo, arguments.spec)
             report = json.loads(Path(arguments.report).read_text()) if arguments.report else None

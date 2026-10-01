@@ -1,7 +1,7 @@
 name = "ticket_implementer"
 description = "Implement or repair exactly one ticket at approved public testing boundaries."
-model = "openai.gpt-6-sol"
-model_reasoning_effort = "high"
+model = "@MODEL@"
+model_reasoning_effort = "@EFFORT@"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Read @SKILL_ROOT@/references/workflow.md and @SKILL_ROOT@/references/results.md.
@@ -16,9 +16,6 @@ structured implementation result. On repair, keep stable finding identifiers.
 You are fresh for this attempt. Read the supplied prior TDD evidence and findings,
 inspect the actual current diff and untracked files, and verify rather than assume
 earlier results still apply. Never discard existing work to recreate prior context.
-For IMPLEMENT_SPEC_RUNTIME_PROBE, return IMPLEMENTER_PROFILE_OK without file
-edits, network requests or delegation. Shell cat may read authorized Markdown
-instruction files if needed.
 """
 
 [features]

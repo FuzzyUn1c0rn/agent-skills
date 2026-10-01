@@ -1,15 +1,12 @@
-import datetime
 import json
 import sys
 import tempfile
-import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workflow
-import smoke_test
 
 
 class WorkflowTests(unittest.TestCase):
@@ -538,91 +535,6 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaises(workflow.WorkflowError):
             run.checkpoint("first-agent")
 
-    def smoke_records(self):
-        records = [
-            {"id": role, "role": role, "models": [[model, effort]], "depth": depth,
-             "parent": None if role == "outer" else "outer" if depth == 1 else "implementation_coordinator",
-             "limit_rejections": 1 if role == "implementation_coordinator" else 0,
-             "markers": [f"{role.split('_')[-1].upper()}_PROFILE_OK"], "operations": []}
-            for role, (model, effort, depth) in smoke_test.EXPECTED.items()
-        ]
-        for role in ("ticket_implementer", "ticket_verifier"):
-            original = next(record for record in records if record["role"] == role)
-            records.append({**original, "id": role + "_repair", "operations": []})
-        outer = next(record for record in records if record["role"] == "outer")
-        coordinator = next(record for record in records if record["role"] == "implementation_coordinator")
-        for owner, children in (
-            (outer, ["implementation_coordinator", "spec_auditor"]),
-            (coordinator, ["ticket_implementer", "ticket_verifier",
-                           "ticket_implementer_repair", "ticket_verifier_repair"]),
-        ):
-            for child in children:
-                role = next(record["role"] for record in records if record["id"] == child)
-                owner["operations"].append(
-                    {"name": "spawn_agent", "spawned": child, "role": role, "succeeded": True})
-                if child == "ticket_implementer":
-                    owner["operations"].append(
-                        {"name": "spawn_agent", "role": role, "succeeded": False, "limit_rejected": True})
-                owner["operations"].extend([
-                    {"name": "wait_agent", "completed": [child], "succeeded": True},
-                    {"name": "close_agent", "target": child, "succeeded": True},
-                ])
-        return records
-
-    def test_native_smoke_accepts_sequential_fresh_repairs(self):
-        self.assertTrue(all(smoke_test.validate_records(self.smoke_records()).values()))
-
-    def test_native_smoke_rejects_repair_before_previous_worker_closes(self):
-        records = self.smoke_records()
-        coordinator = next(record for record in records if record["role"] == "implementation_coordinator")
-        closure = coordinator["operations"].pop(3)
-        coordinator["operations"].append(closure)
-        self.assertFalse(smoke_test.validate_records(records)["repair_lifecycle"])
-
-    def test_native_smoke_rejects_repair_model_drift(self):
-        records = self.smoke_records()
-        repair = next(record for record in records if record["id"] == "ticket_implementer_repair")
-        repair["models"] = [["openai.gpt-6-luna", "medium"]]
-        self.assertFalse(smoke_test.validate_records(records)["effective_models"])
-
-    def test_native_smoke_rejects_auditor_closed_before_completion(self):
-        records = self.smoke_records()
-        outer = next(record for record in records if record["role"] == "outer")
-        outer["operations"] = [
-            operation for operation in outer["operations"]
-            if "spec_auditor" not in operation.get("completed", [])
-        ]
-        self.assertFalse(smoke_test.validate_records(records)["workers_completed"])
-
-    def test_smoke_does_not_accept_commentary_markers(self):
-        home = self.repo / "codex"
-        folder = home / "sessions" / datetime.datetime.now(datetime.timezone.utc).strftime("%Y/%m/%d")
-        folder.mkdir(parents=True)
-        events = [
-            {"type": "session_meta", "payload": {"id": "outer", "cwd": str(self.repo)}},
-            {"type": "response_item", "payload": {
-                "type": "message", "role": "assistant", "phase": "commentary",
-                "content": [{"type": "output_text", "text": "I will return AUDITOR_PROFILE_OK later"}],
-            }},
-        ]
-        (folder / "session.jsonl").write_text("\n".join(json.dumps(event) for event in events) + "\n")
-        with patch.dict("os.environ", {"CODEX_HOME": str(home)}):
-            records = smoke_test.metadata("outer", self.repo, time.time() - 1)
-        self.assertEqual([], records[0]["markers"])
-
-    def test_model_metadata_alone_cannot_pass_smoke(self):
-        records = [
-            {"id": role, "role": role, "models": [[model, effort]], "depth": depth,
-             "limit_rejections": 1 if role == "implementation_coordinator" else 0,
-             "markers": [], "operations": []}
-            for role, (model, effort, depth) in smoke_test.EXPECTED.items()
-        ]
-        checks = smoke_test.validate_records(records)
-        self.assertTrue(checks["effective_models"])
-        self.assertFalse(checks["workers_completed"])
-        self.assertFalse(checks["repair_lifecycle"])
-        self.assertFalse(checks["children_closed"])
-
     def test_interruption_after_status_write_is_recoverable(self):
         run = self.new_run()
         run.begin("ticket.md")
@@ -721,20 +633,6 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(committed, workflow.git(self.repo, "rev-parse", final_commit + "^"))
         self.assertEqual("ready", recovered.data["phase"])
         self.assertEqual(1, recovered.data["tickets"]["ticket.md"]["attempts"])
-
-    def test_resumed_worker_needs_a_second_closure(self):
-        records = [
-            {"id": role, "role": role, "models": [[model, effort]], "depth": depth,
-             "limit_rejections": 0, "markers": [], "operations": []}
-            for role, (model, effort, depth) in smoke_test.EXPECTED.items()
-        ]
-        coordinator = next(record for record in records if record["role"] == "implementation_coordinator")
-        coordinator["operations"] = [
-            {"name": "close_agent", "target": "ticket_implementer", "succeeded": True},
-            {"name": "resume_agent", "target": "ticket_implementer", "succeeded": True},
-        ]
-        self.assertFalse(smoke_test.validate_records(records)["children_closed"])
-
 
 if __name__ == "__main__":
     unittest.main()

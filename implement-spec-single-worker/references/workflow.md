@@ -6,16 +6,21 @@ executes the approved plan.
 
 ## Roles
 
-| Role | Model | Effort | Responsibility |
-| --- | --- | --- | --- |
-| Outer session | openai.gpt-6-astra | high | Preflight, decisions, final audit and report |
-| implementation_coordinator | openai.gpt-6-luna | medium | Dependency order, handoffs, ticket closure and local commits |
-| ticket_implementer | openai.gpt-6-sol | high | TDD implementation and scoped repairs |
-| ticket_verifier | openai.gpt-6-sol | high | Independent ticket verification |
-| spec_auditor | openai.gpt-6-astra | high | Independent verification of the complete specification |
+| Role | Responsibility |
+| --- | --- |
+| Outer session | Preflight, decisions, final audit and report |
+| implementation_coordinator | Dependency order, handoffs, ticket closure and local commits |
+| ticket_implementer | TDD implementation and scoped repairs |
+| ticket_verifier | Independent ticket verification |
+| spec_auditor | Independent verification of the complete specification |
 
-The workflow preset applies to the outer session. Agent profiles apply to
-spawned sessions. Ordinary Codex defaults remain unchanged.
+`settings.toml` defines every role's model and effort. Installation generates
+profiles from those settings; do not override models in individual spawn calls.
+In current-session mode the user chooses the outer model and effort. Only
+new-session mode applies the launcher's configured model and effort.
+Current-session admission checks local configuration and checkout ownership
+without changing startup settings.
+The dedicated launcher supplies necessary overrides only to its own process.
 
 ## Preflight and branch selection
 
@@ -46,10 +51,11 @@ spawned sessions. Ordinary Codex defaults remain unchanged.
    the PRD's explicit order, then ticket path.
 8. Establish the offline test baseline. A required check that cannot complete
    or already fails blocks the run; do not silently exclude it.
-9. Require current compatibility evidence for named-profile selection,
-   effective models and efforts, nested delegation and rejection of a second
-   implementation worker. A configuration file or a cooperating lock alone
-   is not evidence that the runtime rejects concurrent workers.
+9. Proceed to real ticket work using the named native profiles. Startup does
+   not run agent probes or simulated work. Sequential execution is the
+   coordinator's responsibility; the workflow does not impose a runtime
+   agent-count limit. A missing tool or failed real-work spawn stops the run
+   with its actual error rather than triggering test agents or another outer.
 
 Live integration tests, migrations and external-service writes require explicit
 run-level authorization. Mention in a ticket is insufficient. Required checks
@@ -60,6 +66,7 @@ without authorization block preflight.
 The coordinator remains active while its one child works. The outer agent
 waits for the coordinator and does not start another worker. The implementer,
 verifier and auditor execute their own tasks without delegation.
+Additional runtime agent slots never authorize overlapping ticket work.
 
 1. Select the next unfinished ticket whose dependencies have completed commits.
    Record its starting HEAD and increment its persistent attempt count before
@@ -87,7 +94,7 @@ verifier and auditor execute their own tasks without delegation.
    - `PASS`: all required criteria and checks completed, no blocking finding.
    - `REWORK`: evidence-backed problems that can be corrected within the agreed
      scope. Close the verifier and submit its report to the guard. Resolve any
-     required adjudication before starting a fresh Sol/high repair implementer.
+     required adjudication before starting a fresh configured repair implementer.
    - `BLOCKED`: missing decisions, unavailable checks, permission failures or
      another obstacle that implementation cannot resolve within scope.
    Invalid, incomplete or contradictory reports are not a pass.
@@ -121,7 +128,7 @@ not make an old disagreement new. The coordinator must also call `dispute` befor
 another repair when it or the implementer contests a finding, even on attempt one.
 
 Close the verifier and all other leaves first. The coordinator returns the
-request and remains open but idle. The outer Astra/high agent adjudicates
+request and remains open but idle. The outer agent adjudicates
 directly, without another sub-agent or source edits. Give it the ticket, approved
 PRD, repository rules, current diff, actual check results, original reports,
 attempt history and dispute evidence.
@@ -159,7 +166,9 @@ reset files, restart attempt counts or accept an interrupted verification.
 Reconcile a commit that succeeded just before interruption against the actual
 commit and ticket status before recording it as complete.
 
-Only the outer Codex session is resumed. Do not resume closed sub-agents:
+New-session mode resumes the recorded outer. Current-session mode can hand the
+saved run to the invoking outer after confirming inactive old workers, using
+[entry.md](entry.md). Do not resume closed sub-agents:
 the tested runtime can replace their model settings with their parent's.
 After confirming old children and coordinator are inactive, spawn a fresh
 coordinator with the saved run. Reuse a completed implementation result only

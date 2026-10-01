@@ -1,8 +1,6 @@
 ---
 name: implement-spec-single-worker
 description: Execute an approved AFK PRD sequentially with a coordinator, TDD implementers, independent verification, local commits and a final audit.
-argument-hint: "PRD path; optional branch; resume"
-disable-model-invocation: true
 ---
 
 # Sequential implementation
@@ -13,21 +11,46 @@ executing repository tickets.
 
 ## Start
 
-Use the dedicated launcher from the repository root:
+The user invokes the skill, not a Python command:
 
-```sh
-python3 ~/.agents/skills/implement-spec-single-worker/scripts/workflow.py launch path/to/PRD.md
+```text
+$implement-spec-single-worker path/to/PRD.md
+$implement-spec-single-worker path/to/PRD.md session=new branch=feature/name
+$implement-spec-single-worker path/to/PRD.md resume
 ```
 
-Add `--branch feature/name` to select an existing branch or create it from the
-current commit. Without it, `main` gets a new implementation branch and other
-branches are reused. Add `--resume` for an interrupted run on its recorded branch.
+Read [entry.md](references/entry.md) before starting or recovering a run.
+Resolve `session` from the invocation, then `default_session` in
+[settings.toml](settings.toml). The shipped default is `current`.
 
-The launcher uses the `implement-spec` Codex preset, checks recorded native
-compatibility and holds an operating-system checkout lock for the session.
-When invoked inside an ordinary session, finish the requested planning or
-inspection and explain the launch command. Execution requires the preset and
-launcher; do not emulate named profiles by copying prompts into generic agents.
+- `current`: this invoking Codex session is the outer agent. The user selects
+  its model and effort. Do not change either or start a replacement outer.
+  Run the entry helper internally to hold the checkout lock, complete local
+  preflight and proceed to the actual ticket work.
+- `new`: run the dedicated launcher internally. It opens a separate outer
+  with the configured launcher model and effort. An outer already opened by
+  the launcher proceeds directly; never recursively launch another session.
+
+Use `branch=name` to select an existing branch or create it from the current
+commit. Otherwise create a branch on `main` and reuse a non-main branch.
+`resume` preserves the saved run, unfinished changes and retry budgets.
+No remembered Python syntax is required from the user.
+
+Role models and efforts come only from `settings.toml`. Generated profiles and
+tests consume that file. Read [runtime.md](references/runtime.md) when changing
+settings or handling an actual agent-tool error.
+Missing native `agent_type` tools or a failed real-work spawn blocks execution.
+Do not copy role prompts into generic agents as a substitute.
+Use existing session defaults whenever adequate. Never create or edit project or
+personal startup configuration to enable this skill. Required launcher overrides
+apply only to its dedicated process. If current-session capabilities are missing,
+report the missing capability; switching modes requires the user's choice.
+
+Agent threads are for the real coordinator, ticket implementation or repair,
+ticket verification and final audit. Do not spawn runtime probes, test agents,
+marker-only agents or simulated repair cycles. In current mode keep the native
+agent tree attached to this visible outer session. Report ticket transitions,
+completed commits and blockers here so the user can follow the work.
 
 ## Outer agent
 
@@ -41,7 +64,10 @@ launcher; do not emulate named profiles by copying prompts into generic agents.
    the guard. For a resume, reconcile the saved state and old agent lifecycle
    before allowing any new worker. Never discard unfinished changes.
 4. Spawn exactly one native `implementation_coordinator` by `agent_type`, with
-   no model or effort override. Supply the PRD and saved run record paths.
+   no model or effort override or full-history fork. In current-session mode
+   first ask it to return `COORDINATOR_READY` without starting work. Wait for that response, register
+   its ID using `entry.py coordinator SPEC --agent ID`, then send the plan with
+   `send_input`. Supply the PRD and saved run record paths.
    Wait while it processes tickets. The outer agent does not modify project
    files or start another worker while the coordinator or a worker is executing.
 5. Adjudicate repeated or disputed blocking findings once per ticket, using
@@ -64,8 +90,9 @@ and [results.md](references/results.md).
 
 Follow the saved plan. One unfinished ticket and one child at a time. Run the
 guard's `begin` before a new implementation attempt. Spawn `ticket_implementer`
-fresh for every attempt, including repairs. Supply the current diff and untracked
-files, prior TDD evidence and verifier findings from the saved attempt history.
+fresh without a full-history fork for every attempt, including repairs. Supply
+the current diff and untracked files, prior TDD evidence and verifier findings
+from the saved attempt history.
 Never resume a closed implementer: the tested runtime changes its model settings.
 
 Wait for the implementer, record its result, and close its active agent slot.
@@ -79,16 +106,17 @@ Unavailable required checks, ambiguous reports and exhausted retries cannot
 be treated as a pass. Advisory suggestions do not authorize scope expansion.
 
 Before another repair, check the guard's phase. `adjudicating` requires the outer
-Astra agent's decision. Report disputed findings with `dispute`; preserve the
+agent's decision. Report disputed findings with `dispute`; preserve the
 verifier's original report. Keep your thread open but idle during adjudication.
 The decision cannot grant PASS or reset attempts.
 
-Keep the coordinator open while its child runs. The V1 settings allow two open
-threads across the tree, reserving one for the coordinator and one for its worker.
-The root must retain the coordinator until all ticket work stops.
-Leaf agents have delegation disabled.
-A second launcher is rejected by the checkout lock. This applies to the
-supported workflow; the user must keep the checkout exclusive.
+Keep the coordinator open while its child runs. The coordinator is responsible
+for sequential execution even when Codex offers additional agent slots. This
+workflow does not set a runtime concurrent-agent cap. The outer agent waits;
+leaf agents have delegation disabled. Python guards manage ticket state but do
+not intercept native agent spawning. There is no hard single-worker guarantee.
+A second workflow entry is rejected by the checkout lock, but that lock does not
+control unrelated agents or software. The user must keep the checkout exclusive.
 
 ## Limits
 
@@ -102,6 +130,5 @@ migrations and external-service writes require explicit run-level authorization.
 Never push or rewrite history.
 
 Read [runtime.md](references/runtime.md) when installing, changing runtime
-settings, or when the compatibility check fails. The framework must demonstrate
-named-profile selection, resolved models, nested delegation and rejection of
-overlapping workers before processing real tickets.
+settings or handling an actual agent-tool error. Startup checks local settings,
+checkout ownership and saved state without launching test agents.

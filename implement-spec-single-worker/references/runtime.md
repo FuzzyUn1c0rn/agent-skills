@@ -1,76 +1,101 @@
-# Runtime installation and verification
+# Runtime installation
 
-This workflow targets the local Codex CLI and its native V1 agent tools. The
-current chat's tool facade can differ from the standalone CLI. A facade without
-an `agent_type` selector cannot establish that named profiles were selected.
+This workflow uses native named Codex agents for real work. It does not run
+runtime probes, create test agents or require a compatibility receipt.
+Current-session mode is the default: the invoking visible session remains
+the outer agent. A separate launcher is available only through `session=new`.
 
-Install the skill and render its four personal agent profiles and dedicated
-launch preset:
+## Install and configure
+
+The agent runs the installer internally when installation or a settings change
+is requested:
 
 ```sh
 python3 scripts/install.py
-python3 ~/.agents/skills/implement-spec-single-worker/scripts/smoke_test.py
 ```
 
-Installation backs up replaced files beneath `~/.codex/backups/`. It does not
-change the base `~/.codex/config.toml` or the existing `/implement` and TDD skills.
-The existing skill remains explicitly invoked.
+Installation renders the four named profiles and a dedicated launch preset.
+It backs up replaced files beneath `~/.codex/backups/` and removes the retired
+probe script and receipt. It does not modify personal or project startup
+configuration, the existing `/implement` skill or the TDD skill.
 
-The launch preset registers each role's `config_file` and pins the agreed
-models and efforts. It enables native V1 delegation. The shared tree capacity
-is two open threads, including the coordinator itself. Keep the coordinator
-resident until ticket work stops; this leaves one worker slot.
-Leaf profiles disable delegation. Native depth is two. The smoke test must
-prove that these settings compose on the installed version.
+Edit only `settings.toml` to change a role's model or effort. `[launcher]`
+controls the outer model only in new-session mode. `[roles.<name>]` controls
+the four sub-agent profiles. The current outer's model and effort remain the
+user's choice. Run the installer after changing settings to regenerate profiles.
+Make these changes between runs, not while workers are active.
 
-Project configuration can override a selected preset. The launcher and native
-probe therefore also pin the preset's model, effort, role paths and concurrency
-settings with CLI overrides. The compatibility receipt covers those profile files.
+`workflow.py doctor` checks local installed models against `settings.toml`
+and reports the CLI version. It does not start agents or make model calls.
+Passing it is a local configuration check, not a guarantee of agent behavior.
 
-An outer limit of one was tested and rejected: it also prevented the
-coordinator's first worker. The limit is shared; a child profile cannot raise it.
-The supported topology therefore retains the coordinator for the entire
-ticket phase. Arbitrary direct root-worker orchestration is outside this mode.
+The invoking session must have tools that support the configured named roles
+and coordinator-to-worker nesting. Use those tools for actual work. If a
+required tool is absent or a real spawn fails, report the actual error and
+stop. Do not copy role prompts into generic agents, create diagnostic threads
+or silently switch to a separate outer session.
 
-Run the helper tests before installing changed guard code:
+Spawn named roles without full-history forking. The tested runtime rejects
+selecting a different named role together with a full-history fork.
+
+## Configuration scope
+
+Keep existing defaults whenever adequate. This skill never installs project-wide
+feature flags, depth limits, agent-count limits or role registrations.
+Current-session entry does not require a project config file or alter startup
+settings. The dedicated launcher supplies its configured outer model, role
+paths and nesting allowance through arguments to that process only.
+
+The coordinator inherits delegation settings without adding a depth ceiling.
+Leaf profiles retain their task-specific no-delegation and sandbox settings.
+Neither entry mode installs a concurrent-agent cap. Sequential execution is
+the coordinator's responsibility, not a hard runtime guarantee.
+
+To undo an older project installation, first inspect its original installation
+evidence and backups. Matching generated values does not prove ownership:
+an old setup may have overwritten a user's depth or retained their cap.
+Only when setup created the file without replacing user settings may the agent
+run `install.py --remove-project-setup /absolute/repository/root --confirm-workflow-only`.
+Cleanup checks the exact generated contents, backs up and removes the file.
+Otherwise restore only confirmed workflow changes from the original backup,
+preserving subsequent user edits. The old `--project` setup option is removed.
+Existing sessions may retain loaded settings after cleanup; clearing context
+alone does not establish a settings reload.
+
+## State and real-work safeguards
+
+Both modes share the checkout lock. Current-session entry holds it with a
+persistent helper and requires inactive-worker evidence to recover stale
+ownership after a crash. Only its outer and registered real coordinator may
+change run state. Registration reads that coordinator's existing native session
+metadata; it does not create a test agent.
+
+The guard retains dependency checks, retry budgets, saved handovers, independent
+ticket verification, snapshot checks and commit recovery. None requires
+simulated agents. The lock excludes another cooperating workflow, not unrelated
+agents or editors. Keep the checkout exclusive.
+
+For repairs, close the verifier and spawn a fresh configured implementer with
+the current diff, prior TDD evidence and verifier findings. Native resume was
+observed on Codex 0.159.3 to change a closed implementer's model and effort to
+its parent's settings. Fresh repair agents remain the agreed behavior.
+
+Resume reconciles the saved run and confirms old workers stopped before real
+delegation. Changing the outer owner does not reset attempts or accept
+unfinished changes automatically. Read [entry.md](entry.md) for handover.
+
+Verifiers and auditors may need disposable test output. Use the repository's
+supported temporary-directory options. Unavailable required checks block
+verification; do not silently broaden permissions or treat them as passing.
+
+## Maintainer tests
+
+The helper tests use temporary Git repositories and simulated session metadata.
+They do not launch Codex agents or make model calls:
 
 ```sh
 python3 -m unittest discover -s tests -v
 ```
 
-The native smoke test uses a temporary Git repository. It selects each real
-profile by name, exercises the outer/coordinator/worker nesting, attempts a
-second worker while the coordinator remains open, then exercises two sequential
-fresh implementers and fresh verifiers. It checks completed waits, slot closures,
-and recorded runtime model, effort and role metadata. It preserves only the probe evidence needed to
-explain the result. It does not implement application tickets.
-
-`references/runtime-evidence.json` identifies the tested CLI version and profile
-fingerprint. The launcher refuses a different version or changed profiles until
-the smoke test is repeated. The process lock rejects another invocation of this
-launcher in the same checkout. Neither mechanism controls a human or unrelated
-software deliberately editing the checkout; exclusive checkout use is required.
-
-For repairs, close the verifier, then spawn a fresh Sol/high implementer with the
-current diff, prior TDD evidence and verifier findings. Native resume was tested
-on Codex 0.159.3: a closed Sol/high implementer resumed with its parent's
-Luna/medium settings, even with explicit sub-agent model defaults. Native V1
-resume accepts no model override. Fresh repair agents are the user-approved
-v1 choice; never silently fall back to resumed or generic agents.
-For session recovery, the launcher resumes the recorded outer Codex session,
-then reconciles the saved run and old agent lifecycle before fresh delegation.
-Do not assume resumed sub-agents retain their configured models.
-
-The read-only verifier and auditor still need temporary test output. Use the
-repository's supported temporary-directory options. Required tests that need
-unavailable filesystem permissions block verification; do not silently broaden
-the profile or call those checks passed.
-
-Official references consulted for configuration and hook limitations:
-
-- `https://developers.openai.com/codex/multi-agent/`
-- `https://developers.openai.com/codex/config-reference/`
-- `https://developers.openai.com/codex/hooks/`
-
-Hook files alone are not used as the concurrency guarantee. Unsupported hook
-responses, hook failures and untrusted hooks can leave calls unblocked.
+These are development tests for the helpers, not an automatic implementation
+startup step.

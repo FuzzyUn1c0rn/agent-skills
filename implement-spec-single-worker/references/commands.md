@@ -3,9 +3,11 @@
 Run `python3 <skill-directory>/scripts/workflow.py ACTION SPEC` from the repository
 root, or supply `--repo`. Spec and ticket paths are repository-relative.
 
-The launcher selects the branch before opening Codex. A direct session without
-the launcher does not hold the checkout lock. `doctor` checks the installed
-runtime/profile receipt and makes no project changes.
+Read [entry.md](entry.md) for both entry modes. The launcher selects the branch
+before opening Codex. Current-session entry holds the same lock and selects the
+branch during local admission. Guard mutations require a live, admitted entry
+or validated launcher. `doctor` checks the launcher's installed runtime/profile
+settings and makes no project changes or model calls; it does not start agents.
 
 ## Plan and state
 
@@ -72,7 +74,7 @@ Use `status` for authoritative state.
 6. On PASS, inspect the exact diff and selected paths, then call `commit SPEC`.
    The guard rejects a stale review, closes the ticket and commits that status
    with the reviewed work. On REWORK, return to `begin` and spawn a fresh
-   Sol/high implementer with the current diff, prior TDD evidence and findings.
+   configured implementer with the current diff, prior TDD evidence and findings.
    First check for `adjudicating` and report any dispute as described below.
    Do not resume the old agent. On BLOCKED, stop the entire run.
 

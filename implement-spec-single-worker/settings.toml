@@ -1,0 +1,21 @@
+default_session = "current"
+
+[launcher]
+model = "openai.gpt-6-astra"
+effort = "high"
+
+[roles.implementation_coordinator]
+model = "openai.gpt-6-luna"
+effort = "medium"
+
+[roles.ticket_implementer]
+model = "openai.gpt-6-sol"
+effort = "high"
+
+[roles.ticket_verifier]
+model = "openai.gpt-6-sol"
+effort = "high"
+
+[roles.spec_auditor]
+model = "openai.gpt-6-astra"
+effort = "high"
