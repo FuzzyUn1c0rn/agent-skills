@@ -74,7 +74,7 @@ class WorkflowTests(unittest.TestCase):
         })
         return run
 
-    def implement_and_review(self, run, verdict):
+    def implement_and_review(self, run, verdict, finding_id="F1"):
         attempt = run.data["tickets"]["ticket.md"]["attempts"]
         run.implemented({
             "outcome": "READY_FOR_REVIEW", "ticket": "ticket.md", "attempt": attempt,
@@ -87,7 +87,7 @@ class WorkflowTests(unittest.TestCase):
             "base_commit": run.data["head"], "reviewed_snapshot": run.data["checkpoint"],
             "criteria": [{"id": "AC1", "satisfied": True, "evidence": "Observed behavior"}],
             "checks": [{"command": ["suite"], "exit_code": 0, "evidence": "Suite passed"}],
-            "blocking_findings": [] if verdict == "PASS" else [{"id": "F1", "evidence": "Missing behavior"}],
+            "blocking_findings": [] if verdict == "PASS" else [{"id": finding_id, "evidence": "Missing behavior"}],
             "unavailable_checks": [],
         })
 
@@ -95,10 +95,232 @@ class WorkflowTests(unittest.TestCase):
         run = self.new_run()
         for attempt in range(3):
             run.begin("ticket.md")
-            self.implement_and_review(run, "REWORK")
+            self.implement_and_review(run, "REWORK", finding_id=f"F{attempt + 1}")
             run = workflow.Run(self.repo, "PRD.md")
         with self.assertRaises(workflow.WorkflowError):
             run.begin("ticket.md")
+
+    def test_repeated_finding_requires_adjudication_before_another_repair(self):
+        run = self.new_run()
+        for attempt in range(2):
+            run.begin("ticket.md")
+            self.implement_and_review(run, "REWORK")
+        recovered = workflow.Run(self.repo, "PRD.md")
+        self.assertEqual("adjudicating", recovered.data["phase"])
+        self.assertEqual(["F1"], recovered.data["tickets"]["ticket.md"]["adjudication"]["finding_ids"])
+        with self.assertRaises(workflow.WorkflowError):
+            recovered.begin("ticket.md")
+        with self.assertRaises(workflow.WorkflowError):
+            recovered.commit_ticket()
+        self.assertEqual(2, recovered.data["tickets"]["ticket.md"]["attempts"])
+
+    def dispute_report(self, run):
+        return {
+            "ticket": "ticket.md", "attempt": run.data["tickets"]["ticket.md"]["attempts"],
+            "reviewed_snapshot": run.data["checkpoint"], "finding_ids": ["F1"],
+            "evidence": "The requested naming change is not required by the ticket or repository rules.",
+        }
+
+    def test_disputed_first_review_requires_adjudication(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        run.dispute(self.dispute_report(run))
+        recovered = workflow.Run(self.repo, "PRD.md")
+        self.assertEqual("adjudicating", recovered.data["phase"])
+        self.assertEqual("REWORK", recovered.data["review"]["verdict"])
+        with self.assertRaises(workflow.WorkflowError):
+            recovered.begin("ticket.md")
+
+    def adjudication_report(self, run, decision="REVERIFY", classification="advisory"):
+        return {
+            "ticket": "ticket.md", "attempt": run.data["tickets"]["ticket.md"]["attempts"],
+            "reviewed_snapshot": run.data["checkpoint"], "previous_workers_inactive": True,
+            "decision": decision, "evidence": "Compared the finding with approved requirements and current code.",
+            "findings": [
+                {"id": finding["id"], "classification": classification,
+                 "evidence": "Specific requirement and implementation comparison.", "reference": "ticket.md#AC1"}
+                for finding in run.data["tickets"]["ticket.md"]["findings"]
+            ],
+        }
+
+    def test_dismissing_criticism_requires_fresh_pass_without_changing_attempts(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        original_review = dict(run.data["review"])
+        run.dispute(self.dispute_report(run))
+        run.adjudicate(self.adjudication_report(run))
+        self.assertEqual("reviewing", run.data["phase"])
+        self.assertIsNone(run.data["review"])
+        self.assertEqual(1, run.data["tickets"]["ticket.md"]["attempts"])
+        self.assertEqual(original_review, run.data["tickets"]["ticket.md"]["history"][0]["reviews"][0])
+        with self.assertRaises(workflow.WorkflowError):
+            run.commit_ticket()
+        run.reviewed(dict(original_review, verdict="PASS", blocking_findings=[]))
+        run.commit_ticket()
+        self.assertEqual("ready", run.data["phase"])
+
+    def test_adjudication_allows_one_remaining_repair_then_stops_recurring_disagreement(self):
+        run = self.new_run()
+        for attempt in range(2):
+            run.begin("ticket.md")
+            self.implement_and_review(run, "REWORK")
+        run.adjudicate(self.adjudication_report(run, "REPAIR", "confirmed_blocker"))
+        self.assertEqual("rework", run.data["phase"])
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        recovered = workflow.Run(self.repo, "PRD.md")
+        self.assertEqual("blocked", recovered.data["phase"])
+        self.assertEqual(3, recovered.data["tickets"]["ticket.md"]["attempts"])
+        with self.assertRaises(workflow.WorkflowError):
+            recovered.adjudicate(self.adjudication_report(recovered))
+        with self.assertRaises(workflow.WorkflowError):
+            recovered.resolve({"evidence": "Try another verifier", "previous_workers_inactive": True,
+                               "next_phase": "reviewing"})
+        with self.assertRaises(workflow.WorkflowError):
+            recovered.resolve({"evidence": "User reviewed blocker", "previous_workers_inactive": True,
+                               "user_authorization": "Explicit decision", "next_phase": "rework"})
+
+    def test_ambiguous_requirement_needs_user_resolution_without_extra_attempt(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        run.dispute(self.dispute_report(run))
+        run.adjudicate(self.adjudication_report(run, "BLOCKED", "needs_human"))
+        self.assertEqual("blocked", run.data["phase"])
+        self.assertEqual(1, run.data["tickets"]["ticket.md"]["attempts"])
+        resolution = {"evidence": "Requirement clarified", "previous_workers_inactive": True,
+                      "next_phase": "rework"}
+        with self.assertRaises(workflow.WorkflowError):
+            run.resolve(resolution)
+        run.resolve(dict(resolution, user_authorization="User explicitly confirmed the expected behavior."))
+        run.begin("ticket.md")
+        self.assertEqual(2, run.data["tickets"]["ticket.md"]["attempts"])
+
+    def test_adjudication_cannot_grant_a_fourth_attempt(self):
+        run = self.new_run()
+        for attempt in range(3):
+            run.begin("ticket.md")
+            self.implement_and_review(run, "REWORK", finding_id=f"F{attempt + 1}")
+        run.dispute(dict(self.dispute_report(run), finding_ids=["F3"]))
+        run.adjudicate(self.adjudication_report(run, "REPAIR", "confirmed_blocker"))
+        self.assertEqual("blocked", run.data["phase"])
+        with self.assertRaises(workflow.WorkflowError):
+            run.begin("ticket.md")
+        self.assertEqual(3, run.data["tickets"]["ticket.md"]["attempts"])
+
+    def test_reverification_cannot_restart_the_adjudication_loop(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        review = dict(run.data["review"])
+        run.dispute(self.dispute_report(run))
+        run.adjudicate(self.adjudication_report(run))
+        run.reviewed(review)
+        self.assertEqual("blocked", run.data["phase"])
+        self.assertTrue(run.data["requires_user_resolution"])
+        self.assertEqual(1, run.data["tickets"]["ticket.md"]["attempts"])
+
+    def test_adjudication_cannot_waive_required_checks_or_criteria(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        review = dict(run.data["review"], verdict="PASS", blocking_findings=[])
+        run.dispute(self.dispute_report(run))
+        run.adjudicate(self.adjudication_report(run))
+        invalid = [
+            {"checks": []},
+            {"checks": [{"command": ["suite"], "exit_code": 1, "evidence": "Failed"}]},
+            {"criteria": [{"id": "AC1", "satisfied": False, "evidence": "Unmet"}]},
+            {"unavailable_checks": ["Required live check lacks authorization"]},
+        ]
+        for replacement in invalid:
+            with self.subTest(replacement=replacement), self.assertRaises(workflow.WorkflowError):
+                run.reviewed(dict(review, **replacement))
+        self.assertEqual("reviewing", run.data["phase"])
+        self.assertEqual("ready-for-agent", workflow.status_text(self.repo / "ticket.md"))
+
+    def test_adjudication_rejects_incomplete_stale_or_direct_pass_decisions(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        run.dispute(self.dispute_report(run))
+        report = self.adjudication_report(run)
+        invalid = [
+            {"attempt": 0}, {"reviewed_snapshot": "stale"}, {"previous_workers_inactive": False},
+            {"findings": []}, {"decision": "PASS"}, {"evidence": ""},
+            {"findings": [{**report["findings"][0], "classification": "confirmed_blocker"}]},
+            {"findings": [{**report["findings"][0], "reference": ""}]},
+        ]
+        for replacement in invalid:
+            with self.subTest(replacement=replacement), self.assertRaises(workflow.WorkflowError):
+                run.adjudicate(dict(report, **replacement))
+        self.assertIsNone(run.data["tickets"]["ticket.md"]["adjudication"]["decision"])
+        (self.repo / "unreviewed.py").write_text("changed = True\n")
+        with self.assertRaises(workflow.WorkflowError):
+            run.adjudicate(report)
+
+    def test_adjudication_belongs_to_recorded_outer_session(self):
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "outer-session"}):
+            run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        run.dispute(self.dispute_report(run))
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "coordinator-session"}):
+            with self.assertRaises(workflow.WorkflowError):
+                run.adjudicate(self.adjudication_report(run))
+        with patch.dict("os.environ", {"CODEX_THREAD_ID": "outer-session"}):
+            run.adjudicate(self.adjudication_report(run))
+        self.assertEqual("reviewing", run.data["phase"])
+
+    def test_dispute_cannot_replace_the_current_report_with_unrelated_findings(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK")
+        for replacement in ({"finding_ids": ["other"]}, {"reviewed_snapshot": "stale"}, {"evidence": ""}):
+            with self.subTest(replacement=replacement), self.assertRaises(workflow.WorkflowError):
+                run.dispute(dict(self.dispute_report(run), **replacement))
+        self.assertEqual("rework", run.data["phase"])
+
+    def test_exhausted_attempts_require_user_before_reverification_of_new_findings(self):
+        run = self.new_run()
+        for attempt in range(2):
+            run.begin("ticket.md")
+            self.implement_and_review(run, "REWORK")
+        run.adjudicate(self.adjudication_report(run, "REPAIR", "confirmed_blocker"))
+        run.begin("ticket.md")
+        self.implement_and_review(run, "REWORK", finding_id="NEW")
+        with self.assertRaises(workflow.WorkflowError):
+            run.begin("ticket.md")
+        recovered = workflow.Run(self.repo, "PRD.md")
+        with self.assertRaises(workflow.WorkflowError):
+            recovered.resolve({"evidence": "Try again", "previous_workers_inactive": True,
+                               "next_phase": "reviewing"})
+
+    def test_disputed_blocked_review_gets_the_same_bounded_adjudication(self):
+        run = self.new_run()
+        run.begin("ticket.md")
+        self.implement_and_review(run, "BLOCKED")
+        run.dispute(self.dispute_report(run))
+        self.assertEqual("adjudicating", run.data["phase"])
+        run.adjudicate(self.adjudication_report(run))
+        self.assertEqual("reviewing", run.data["phase"])
+
+    def test_dispute_evidence_attaches_to_pending_automatic_adjudication(self):
+        run = self.new_run()
+        for attempt in range(2):
+            run.begin("ticket.md")
+            self.implement_and_review(run, "REWORK")
+        dispute = self.dispute_report(run)
+        run.dispute(dispute)
+        recovered = workflow.Run(self.repo, "PRD.md")
+        self.assertEqual("adjudicating", recovered.data["phase"])
+        self.assertEqual(dispute, recovered.data["tickets"]["ticket.md"]["adjudication"]["dispute"])
+        self.assertIsNone(recovered.data["tickets"]["ticket.md"]["adjudication"]["decision"])
+        recovered.dispute(dispute)
+        recovered.adjudicate(self.adjudication_report(recovered))
+        self.assertEqual("reviewing", recovered.data["phase"])
 
     def test_commit_closes_ticket_with_code_and_preserves_prd_until_audit(self):
         run = self.new_run()

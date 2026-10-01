@@ -277,7 +277,8 @@ class Run:
             raise WorkflowError("Ticket dependencies are not complete.")
         record = self.data["tickets"][requested]
         if record["attempts"] >= 3:
-            self.data.update(phase="blocked", blocker="Three implementation attempts exhausted.")
+            self.data.update(phase="blocked", requires_user_resolution=True,
+                             blocker="Three implementation attempts exhausted.")
             self.save()
             raise WorkflowError("Three implementation attempts exhausted; the whole run is blocked.")
         record["attempts"] += 1
@@ -345,6 +346,16 @@ class Run:
                 or report.get("reviewed_snapshot") != self.data["checkpoint"]):
             raise WorkflowError("Review does not match the current ticket, attempt, commit and snapshot.")
         verdict = report.get("verdict")
+        findings = report.get("blocking_findings", [])
+        finding_ids = [finding.get("id") for finding in findings]
+        if any(not isinstance(identifier, str) or not identifier.strip() for identifier in finding_ids):
+            raise WorkflowError("Blocking findings need stable, nonempty identifiers.")
+        if len(finding_ids) != len(set(finding_ids)):
+            raise WorkflowError("Blocking finding identifiers must be unique.")
+        previous_ids = {
+            finding["id"] for entry in record.get("history", [])
+            for review in entry.get("reviews", []) for finding in review.get("blocking_findings", [])
+        }
         if verdict == "PASS":
             validate_pass(report, self.ticket(), self.data["plan"]["checks"], self.data["checkpoint"])
             self.data["phase"] = "approved"
@@ -352,11 +363,91 @@ class Run:
             self.data["phase"] = "rework"
         elif verdict == "BLOCKED":
             self.data["phase"] = "blocked"
+            if record.get("adjudication", {}).get("decision"):
+                self.data["requires_user_resolution"] = True
         else:
             raise WorkflowError("Incomplete or invalid verification verdict.")
         record["findings"] = report.get("blocking_findings", [])
         record["history"][-1]["reviews"].append(report)
         self.data["review"] = report
+        repeated = sorted(set(finding_ids) & previous_ids)
+        if verdict == "REWORK" and repeated:
+            self._queue_adjudication(repeated, "Blocking findings recur after prior verification.")
+        self.save()
+
+    def _queue_adjudication(self, finding_ids, evidence):
+        record = self.data["tickets"][self.data["current"]]
+        if record.get("adjudication"):
+            self.data.update(phase="blocked", requires_user_resolution=True,
+                             blocker="The ticket's single adjudication is exhausted; user resolution is required.")
+            return
+        record["adjudication"] = {
+            "attempt": record["attempts"], "reviewed_snapshot": self.data["checkpoint"],
+            "finding_ids": finding_ids, "evidence": evidence, "decision": None,
+        }
+        self.data["phase"] = "adjudicating"
+
+    def dispute(self, report):
+        self.ensure({"rework", "blocked", "adjudicating"}, checkpoint=True)
+        current = self.data["current"]
+        if not current:
+            raise WorkflowError("No current ticket review is available to dispute.")
+        record = self.data["tickets"][current]
+        review = self.data.get("review") or {}
+        identifiers = report.get("finding_ids", [])
+        if (report.get("ticket") != current or report.get("attempt") != record["attempts"]
+                or report.get("reviewed_snapshot") != self.data["checkpoint"]
+                or review.get("verdict") not in {"REWORK", "BLOCKED"} or not report.get("evidence")
+                or not identifiers or len(identifiers) != len(set(identifiers))
+                or not set(identifiers) <= {finding["id"] for finding in record["findings"]}):
+            raise WorkflowError("Dispute must identify current blocking findings and evidence on this snapshot.")
+        if self.data["phase"] != "adjudicating":
+            self._queue_adjudication(identifiers, report["evidence"])
+        if self.data["phase"] == "adjudicating":
+            request = record["adjudication"]
+            if request.get("dispute") not in (None, report):
+                raise WorkflowError("A dispute is already recorded; preserve its evidence for the outer agent.")
+            request["dispute"] = report
+        self.save()
+
+    def adjudicate(self, report):
+        self.ensure({"adjudicating"}, checkpoint=True)
+        current = self.data["current"]
+        record = self.data["tickets"][current]
+        request = record["adjudication"]
+        outer = self.data.get("outer_session")
+        if outer and os.environ.get("CODEX_THREAD_ID") != outer:
+            raise WorkflowError("Only the recorded outer session may adjudicate this ticket.")
+        if (request.get("decision") is not None or report.get("ticket") != current
+                or report.get("attempt") != record["attempts"]
+                or report.get("reviewed_snapshot") != request["reviewed_snapshot"]
+                or report.get("reviewed_snapshot") != self.data["checkpoint"]
+                or report.get("previous_workers_inactive") is not True or not report.get("evidence")):
+            raise WorkflowError("Adjudication requires current evidence, inactive workers and an unused decision.")
+        findings = report.get("findings", [])
+        identifiers = [finding.get("id") for finding in findings]
+        classifications = {finding.get("classification") for finding in findings}
+        if (len(identifiers) != len(set(identifiers))
+                or set(identifiers) != {finding["id"] for finding in record["findings"]}
+                or not classifications <= {"confirmed_blocker", "advisory", "unsupported", "needs_human"}
+                or any(not finding.get("evidence") or not finding.get("reference") for finding in findings)):
+            raise WorkflowError("Classify every current blocker with evidence and a requirement or rule reference.")
+        decision = report.get("decision")
+        if decision == "REVERIFY" and classifications <= {"advisory", "unsupported"}:
+            target = "reviewing"
+        elif decision == "REPAIR" and "confirmed_blocker" in classifications and "needs_human" not in classifications:
+            target = "rework" if record["attempts"] < 3 else "blocked"
+        elif decision == "BLOCKED":
+            target = "blocked"
+        else:
+            raise WorkflowError("Decision does not match the finding classifications.")
+        request["decision"] = report
+        self.data.update(phase=target, review=None)
+        self.data.pop("blocker", None)
+        self.data.pop("requires_user_resolution", None)
+        if target == "blocked":
+            self.data.update(requires_user_resolution=True,
+                             blocker="Adjudication needs a user decision or no repair attempts remain.")
         self.save()
 
     def commit_ticket(self):
@@ -539,6 +630,9 @@ class Run:
         current = self.data["current"]
         if not current:
             raise WorkflowError("Inspect this non-ticket blocker before changing its state.")
+        if (self.data.get("requires_user_resolution") or self.data["tickets"][current]["attempts"] >= 3):
+            if not resolution.get("user_authorization"):
+                raise WorkflowError("The automatic budget is exhausted; record the user's explicit resolution.")
         target = resolution.get("next_phase")
         if target == "reviewing":
             implementation = self.data.get("implementation") or {}
@@ -553,6 +647,7 @@ class Run:
             raise WorkflowError("Resolution can resume verification or an available repair.")
         self.data.setdefault("resolutions", []).append(resolution)
         self.data["phase"] = target
+        self.data.pop("requires_user_resolution", None)
         self.save()
 
 
@@ -639,7 +734,8 @@ def main():
     parser = argparse.ArgumentParser(description="Guard the sequential Codex implementation workflow.")
     parser.add_argument("action", choices=[
         "launch", "prepare", "init", "status", "snapshot", "begin", "implemented",
-        "reviewed", "commit", "finish", "checkpoint", "reconcile-commit", "resolve", "invalidate", "doctor",
+        "reviewed", "dispute", "adjudicate", "commit", "finish", "checkpoint",
+        "reconcile-commit", "resolve", "invalidate", "doctor",
     ])
     parser.add_argument("spec", nargs="?")
     parser.add_argument("--repo", default=os.getcwd())
@@ -679,6 +775,10 @@ def main():
                 run.implemented(report)
             elif arguments.action == "reviewed":
                 run.reviewed(report)
+            elif arguments.action == "dispute":
+                run.dispute(report)
+            elif arguments.action == "adjudicate":
+                run.adjudicate(report)
             elif arguments.action == "commit":
                 print(run.commit_ticket())
             elif arguments.action == "finish":

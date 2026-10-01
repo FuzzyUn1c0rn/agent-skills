@@ -86,8 +86,8 @@ verifier and auditor execute their own tasks without delegation.
 6. Act on the structured verdict:
    - `PASS`: all required criteria and checks completed, no blocking finding.
    - `REWORK`: evidence-backed problems that can be corrected within the agreed
-     scope. Close the verifier, then start a fresh Sol/high repair implementer
-     with the saved handoff context.
+     scope. Close the verifier and submit its report to the guard. Resolve any
+     required adjudication before starting a fresh Sol/high repair implementer.
    - `BLOCKED`: missing decisions, unavailable checks, permission failures or
      another obstacle that implementation cannot resolve within scope.
    Invalid, incomplete or contradictory reports are not a pass.
@@ -111,9 +111,40 @@ Keep advisory suggestions separate. Concrete defects, unmet criteria and
 documented architecture violations can block approval. Style preferences and
 unrelated improvements do not create repair work.
 
-The coordinator routes disagreements to the outer agent. The outer agent may
-settle factual disputes from existing requirements and evidence. A new product,
-interface, scope or expensive architectural tradeoff returns to the user.
+## Adjudication
+
+Each ticket gets at most one outer-agent adjudication across the whole run.
+The guard queues it when a blocking finding ID recurs. This is deliberately
+conservative: the outer agent determines whether a repair made sufficient
+progress. Keep IDs stable for the same underlying problem; changing an ID does
+not make an old disagreement new. The coordinator must also call `dispute` before
+another repair when it or the implementer contests a finding, even on attempt one.
+
+Close the verifier and all other leaves first. The coordinator returns the
+request and remains open but idle. The outer Astra/high agent adjudicates
+directly, without another sub-agent or source edits. Give it the ticket, approved
+PRD, repository rules, current diff, actual check results, original reports,
+attempt history and dispute evidence.
+
+The outer agent classifies every current blocker as `confirmed_blocker`,
+`advisory`, `unsupported` or `needs_human`, citing the relevant requirement or
+repository rule and concrete evidence. A preferred design or naming change is
+not a blocker without an applicable rule. Do not invent requirements to settle
+a dispute. Choose one outcome and record it with `adjudicate`:
+
+- `REPAIR`: give a fresh implementer the confirmed blockers and decision.
+  It consumes the next existing attempt. No remaining attempt means BLOCKED.
+- `REVERIFY`: all alleged blockers were advisory or unsupported. Run one fresh
+  independent verification of the unchanged code with the decision as context.
+  This does not consume an implementation attempt or grant PASS.
+- `BLOCKED`: a human decision or other unresolved obstacle prevents continuation.
+
+Adjudication changes neither acceptance criteria nor required checks. The fresh
+verifier must still meet the full PASS contract. It should not repeat rejected
+preferences as blockers without new evidence; genuinely discovered defects
+still block. Another repeated or disputed finding after adjudication stops the
+whole run for the user, not another adjudication. Explicit user resolution may
+resume eligible work but never resets the adjudication or implementation budget.
 
 ## Recovery
 

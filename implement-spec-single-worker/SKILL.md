@@ -43,10 +43,12 @@ launcher; do not emulate named profiles by copying prompts into generic agents.
 4. Spawn exactly one native `implementation_coordinator` by `agent_type`, with
    no model or effort override. Supply the PRD and saved run record paths.
    Wait while it processes tickets. The outer agent does not modify project
-   files or start another worker during this delegation.
-5. Handle escalations. Resolve factual disputes from existing requirements.
-   Return missing behavior, interface, scope or costly architecture decisions
-   to the user. Preserve the attempt limit and failed-check evidence.
+   files or start another worker while the coordinator or a worker is executing.
+5. Adjudicate repeated or disputed blocking findings once per ticket, using
+   [the adjudication rules](references/workflow.md#adjudication). The coordinator
+   must be idle with every leaf closed. Record the evidence-backed decision
+   through the guard, then return it to the open coordinator. Missing decisions
+   and further unresolved disagreement return to the user.
 6. After all required ticket commits exist, close the coordinator. Spawn one
    native `spec_auditor` with the complete PRD, ticket set, baseline, commit list,
    repository rules and verification evidence.
@@ -75,6 +77,11 @@ Use structured verdicts. `PASS` permits the guard's ticket commit after checking
 the exact diff; `REWORK` permits a bounded repair; `BLOCKED` stops the whole run.
 Unavailable required checks, ambiguous reports and exhausted retries cannot
 be treated as a pass. Advisory suggestions do not authorize scope expansion.
+
+Before another repair, check the guard's phase. `adjudicating` requires the outer
+Astra agent's decision. Report disputed findings with `dispute`; preserve the
+verifier's original report. Keep your thread open but idle during adjudication.
+The decision cannot grant PASS or reset attempts.
 
 Keep the coordinator open while its child runs. The V1 settings allow two open
 threads across the tree, reserving one for the coordinator and one for its worker.

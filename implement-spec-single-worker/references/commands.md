@@ -73,11 +73,36 @@ Use `status` for authoritative state.
    The guard rejects a stale review, closes the ticket and commits that status
    with the reviewed work. On REWORK, return to `begin` and spawn a fresh
    Sol/high implementer with the current diff, prior TDD evidence and findings.
+   First check for `adjudicating` and report any dispute as described below.
    Do not resume the old agent. On BLOCKED, stop the entire run.
 
 The guard validates handoff structure and evidence coverage, not the truth of
 an agent's claims. The independent verifier must inspect the real code and run
 the commands. Save factual test evidence without credentials or sensitive output.
+
+## Adjudication commands
+
+`reviewed` automatically enters `adjudicating` for recurring blocking finding
+IDs. For an explicit disagreement, the coordinator calls
+`dispute SPEC --report /tmp/dispute.json` after saving the original review.
+The dispute identifies the current `ticket`, `attempt`, `reviewed_snapshot`,
+`finding_ids` and concrete `evidence`. It never edits the verifier's report.
+It may dispute findings from either `REWORK` or `BLOCKED`. If automatic
+adjudication is already pending, it attaches one consolidated dispute to that
+request without spending another decision.
+
+With the coordinator idle and all leaves closed, the outer session calls
+`adjudicate SPEC --report /tmp/adjudication.json`. Use the schema in
+[results.md](results.md#adjudication). The guard checks the recorded outer
+session ID when available, binds the decision to the current snapshot, and
+requires a classification for every current blocker. It cannot assess the truth
+of the evidence; that remains the outer agent's responsibility.
+
+The ticket's `adjudication` record survives reloads. `REPAIR` enters `rework`
+only if an attempt remains. `REVERIFY` clears the current verdict and enters
+`reviewing`; only a fresh complete PASS permits a commit. `BLOCKED` or a second
+adjudication request requires user resolution. Return the saved decision to the
+open coordinator with `send_input`, not `resume_agent`.
 
 ## Recovery and audit
 
@@ -116,6 +141,11 @@ checkpoint and use `resolve SPEC --report /tmp/resolution.json` with:
 `reviewing` reruns independent verification of an existing implementation.
 `rework` allows another implementation attempt only when the original limit
 has not been exhausted. Resolution never resets attempts.
+When `requires_user_resolution` is true or three attempts are exhausted, include `user_authorization`
+recording the user's explicit decision. A new agent's opinion or an automatic
+retry is not authorization. Resolving the blocker does not replenish adjudication.
+An interrupted pending adjudication resumes from its saved request; do not
+checkpoint changed code into that request or restart its budget.
 For an interrupted implementer without a completed result, first use `implemented`
 with the current ticket, attempt, `outcome: "BLOCKED"` and interruption evidence.
 After reconciliation, resolve to `rework`. Do not resume the old sub-agent.

@@ -55,6 +55,37 @@ concrete in-scope finding. `BLOCKED` explains the missing decision or capability
 A finding includes an identifier, affected path, evidence, violated requirement
 or rule, and the correction needed. Keep identifiers stable across attempts.
 
+## Adjudication
+
+Only the outer Astra/high agent supplies this decision, with the coordinator
+idle and all leaves closed. Classify every current blocker, including findings
+that were not disputed. Keep the original verifier report intact.
+
+```json
+{
+  "ticket": "path/to/ticket.md",
+  "attempt": 2,
+  "reviewed_snapshot": "fingerprint of the unchanged working tree",
+  "previous_workers_inactive": true,
+  "decision": "REVERIFY",
+  "evidence": "Compared the review, actual code and tests with the approved requirements.",
+  "findings": [
+    {
+      "id": "F1",
+      "classification": "advisory",
+      "reference": "path/to/ticket.md#AC1 and applicable repository guidance",
+      "evidence": "The required behavior and checks pass; the finding requests an optional naming change."
+    }
+  ]
+}
+```
+
+Classifications are `confirmed_blocker`, `advisory`, `unsupported` or
+`needs_human`. `REPAIR` requires a confirmed blocker and no unresolved human
+decision. `REVERIFY` requires every blocker to be advisory or unsupported;
+it requests a fresh verifier, not approval. `BLOCKED` returns the obstacle
+to the user. Cite actual evidence, not the illustrative explanation above.
+
 ## Final auditor
 
 Use the verifier structure with `audited_commit`, `baseline_commit` and
