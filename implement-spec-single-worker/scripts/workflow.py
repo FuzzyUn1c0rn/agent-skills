@@ -9,6 +9,7 @@ import tempfile
 import argparse
 import sys
 import tomllib
+import copy
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -105,7 +106,7 @@ def snapshot(repo, excluded=(), include_index=True):
     return digest.hexdigest()
 
 
-def validate_pass(report, ticket, checks, fingerprint):
+def validate_pass(report, ticket, checks, fingerprint, finding_ids=()):
     if report.get("verdict") != "PASS":
         raise WorkflowError("Verification did not pass.")
     if report.get("ticket") != ticket["path"] or report.get("reviewed_snapshot") != fingerprint:
@@ -126,6 +127,12 @@ def validate_pass(report, ticket, checks, fingerprint):
         matching = [item for item in results if item.get("command") == command]
         if not matching or any(item.get("exit_code") != 0 or not item.get("evidence") for item in matching):
             raise WorkflowError(f"Missing or failed required check: {command}")
+    if finding_ids:
+        resolved = report.get("resolved_findings", [])
+        identifiers = [item.get("id") for item in resolved]
+        if (len(identifiers) != len(set(identifiers)) or set(identifiers) != set(finding_ids)
+                or any(not item.get("evidence") for item in resolved)):
+            raise WorkflowError("Repair PASS needs independent evidence for every assigned audit finding.")
     return True
 
 
@@ -176,6 +183,31 @@ def set_status(path, label):
                            path.read_text(), count=1, flags=re.MULTILINE))
 
 
+def validate_graph(tickets):
+    paths = [ticket["path"] for ticket in tickets]
+    if not paths or len(paths) != len(set(paths)):
+        raise WorkflowError("Plan needs a nonempty, unique required-ticket list.")
+    remaining = set(paths)
+    completed = set()
+    while remaining:
+        available = [
+            ticket["path"] for ticket in tickets
+            if ticket["path"] in remaining and set(ticket.get("blocked_by", [])) <= completed
+        ]
+        if not available:
+            raise WorkflowError("Missing dependency or dependency cycle.")
+        remaining.difference_update(available)
+        completed.update(available)
+
+
+def audit_cycle(number, authorization, round_limit=None):
+    return {
+        "number": number, "authorization": authorization,
+        "round_limit": round_limit if round_limit is not None else configuration.load()["audit_repair_rounds"],
+        "rounds": [], "finding_attempts": {},
+    }
+
+
 class Run:
     def __init__(self, repo, spec):
         self.repo = Path(repo).resolve()
@@ -186,10 +218,34 @@ class Run:
         self.path = git_home(self.repo) / "runs" / identity / "state.json"
         self.record = str(Path(spec).parent / "implementation-run.json")
         self.data = json.loads(self.path.read_text()) if self.path.exists() else None
+        if self.data:
+            self.data.setdefault("audit_cycles", [
+                audit_cycle(1, self.data["plan"]["approval_evidence"]),
+            ])
+            if "audits" not in self.data:
+                self.data["audits"] = []
+                if self.data.get("audit"):
+                    transaction = self.data.get("transaction", {})
+                    pending = transaction.get("kind") == "audit"
+                    self.data["audits"].append({
+                        "number": 1, "report": copy.deepcopy(self.data["audit"]),
+                        "path": str(Path(spec).parent / "final-audit.md"),
+                        "commit": None if pending else self.data["head"], "cycle": 1,
+                    })
 
     def create(self, plan):
         if self.data is not None:
             raise WorkflowError("A run record already exists. Resume it instead of overwriting it.")
+        entry_path = git_home(self.repo) / "entry.json"
+        if entry_path.exists():
+            owner = json.loads(entry_path.read_text())["outer_session"]
+            if os.environ.get("CODEX_THREAD_ID") != owner:
+                raise WorkflowError("Only the admitted outer session may initialize a run.")
+        elif os.environ.get("IMPLEMENT_SPEC_LAUNCH") == "1":
+            session = session_metadata(os.environ.get("CODEX_THREAD_ID"))
+            source = session.get("source")
+            if not source or (isinstance(source, dict) and "subagent" in source):
+                raise WorkflowError("Only the launcher's outer session may initialize a run.")
         if git(self.repo, "status", "--porcelain", "--untracked-files=all"):
             raise WorkflowError("Preflight requires a clean checkout; keep the draft plan outside it.")
         if plan.get("spec") != self.spec or not plan.get("checks"):
@@ -206,21 +262,7 @@ class Run:
             raise WorkflowError("Detached HEAD is not supported.")
         relative_file(self.repo, self.spec).read_text()
         tickets = plan.get("tickets", [])
-        paths = [ticket["path"] for ticket in tickets]
-        if not paths or len(paths) != len(set(paths)):
-            raise WorkflowError("Plan needs a nonempty, unique required-ticket list.")
-        remaining = set(paths)
-        completed = set()
-        while remaining:
-            available = [
-                ticket["path"] for ticket in tickets
-                if ticket["path"] in remaining and set(ticket.get("blocked_by", [])) <= completed
-            ]
-            if not available:
-                raise WorkflowError("Missing dependency or dependency cycle.")
-            for path in available:
-                remaining.remove(path)
-                completed.add(path)
+        validate_graph(tickets)
         records = {}
         for ticket in tickets:
             path = relative_file(self.repo, ticket["path"])
@@ -239,13 +281,14 @@ class Run:
                 "preexisting": closed, "findings": [], "implementer": None, "history": [],
             }
         self.data = {
-            "version": 1, "repo": str(self.repo), "spec": self.spec,
+            "version": 2, "repo": str(self.repo), "spec": self.spec,
             "branch": git(self.repo, "branch", "--show-current"),
             "baseline": git(self.repo, "rev-parse", "HEAD"),
             "head": git(self.repo, "rev-parse", "HEAD"),
             "outer_session": os.environ.get("CODEX_THREAD_ID"),
             "plan": plan, "tickets": records, "phase": "ready", "current": None,
             "checkpoint": None,
+            "audits": [], "audit_cycles": [audit_cycle(1, plan["approval_evidence"])],
         }
         self.save()
 
@@ -265,9 +308,43 @@ class Run:
             raise WorkflowError(f"Cannot perform this operation in phase {self.data['phase']}.")
         if checkpoint and snapshot(self.repo, [self.record]) != self.data["checkpoint"]:
             raise WorkflowError("Checkout differs from the last checkpoint; inspect before resuming.")
+        self.require_audit_integrity()
+
+    def require_audit_integrity(self):
+        for audit in self.data["audits"]:
+            if not audit.get("commit"):
+                continue
+            path = relative_file(self.repo, audit["path"])
+            original = subprocess.check_output(
+                ["git", "-C", str(self.repo), "cat-file", "blob", f"{audit['commit']}:{audit['path']}"]
+            )
+            if not path.is_file() or path.read_bytes() != original:
+                raise WorkflowError(f"Historical audit report changed or disappeared: {audit['path']}")
 
     def ticket(self):
         return next(item for item in self.data["plan"]["tickets"] if item["path"] == self.data["current"])
+
+    def require_outer(self):
+        outer = self.data.get("outer_session")
+        if outer and os.environ.get("CODEX_THREAD_ID") != outer:
+            raise WorkflowError("Only the recorded outer session may plan or continue audit repairs.")
+
+    def require_handoff(self, report):
+        self.require_outer()
+        if (not report or report.get("reviewed_snapshot") != self.data["checkpoint"]
+                or report.get("previous_workers_inactive") is not True or not report.get("evidence")):
+            raise WorkflowError("Audit handoff needs the current snapshot and evidence that all workers closed.")
+
+    def attempts_remaining(self, requested):
+        record = self.data["tickets"][requested]
+        remaining = record.get("attempt_limit", 3) - record["attempts"]
+        if record.get("audit_findings"):
+            cycle = self.data["audit_cycles"][-1]
+            remaining = min(remaining, *[
+                3 - cycle["finding_attempts"].get(identifier, 0)
+                for identifier in record["audit_findings"]
+            ])
+        return remaining
 
     def begin(self, requested):
         self.ensure({"ready", "rework"}, checkpoint=True)
@@ -279,12 +356,16 @@ class Run:
         if any(not self.data["tickets"][dependency]["commit"] for dependency in ticket.get("blocked_by", [])):
             raise WorkflowError("Ticket dependencies are not complete.")
         record = self.data["tickets"][requested]
-        if record["attempts"] >= 3:
+        if self.attempts_remaining(requested) <= 0:
             self.data.update(phase="blocked", requires_user_resolution=True,
-                             blocker="Three implementation attempts exhausted.")
+                             current=requested, budget_exhausted="ticket_attempts",
+                             blocker="Three implementation attempts exhausted in the current allowance.")
             self.save()
             raise WorkflowError("Three implementation attempts exhausted; the whole run is blocked.")
         record["attempts"] += 1
+        for identifier in record.get("audit_findings", []):
+            attempts = self.data["audit_cycles"][-1]["finding_attempts"]
+            attempts[identifier] = attempts.get(identifier, 0) + 1
         record.setdefault("review_base", self.data["head"])
         record["implementer"] = None
         record.setdefault("history", []).append({
@@ -319,6 +400,8 @@ class Run:
         if report.get("outcome") != "READY_FOR_REVIEW":
             self.data["tickets"][ticket["path"]]["history"][-1]["implementation"] = report
             self.data.update(phase="blocked", blocker=report)
+            if self.attempts_remaining(ticket["path"]) <= 0:
+                self.data.update(budget_exhausted="ticket_attempts", requires_user_resolution=True)
             self.save()
             return
         if ticket.get("kind", "behavior") == "behavior":
@@ -357,10 +440,12 @@ class Run:
             raise WorkflowError("Blocking finding identifiers must be unique.")
         previous_ids = {
             finding["id"] for entry in record.get("history", [])
+            if entry["attempt"] > record.get("attempt_start", 0)
             for review in entry.get("reviews", []) for finding in review.get("blocking_findings", [])
         }
         if verdict == "PASS":
-            validate_pass(report, self.ticket(), self.data["plan"]["checks"], self.data["checkpoint"])
+            validate_pass(report, self.ticket(), self.data["plan"]["checks"], self.data["checkpoint"],
+                          record.get("audit_findings", []))
             self.data["phase"] = "approved"
         elif verdict == "REWORK" and report.get("blocking_findings"):
             self.data["phase"] = "rework"
@@ -374,7 +459,11 @@ class Run:
         record["history"][-1]["reviews"].append(report)
         self.data["review"] = report
         repeated = sorted(set(finding_ids) & previous_ids)
-        if verdict == "REWORK" and repeated:
+        if verdict != "PASS" and self.attempts_remaining(current) <= 0:
+            self.data.update(phase="blocked", requires_user_resolution=True,
+                             budget_exhausted="ticket_attempts",
+                             blocker="Three implementation attempts exhausted in the current allowance.")
+        elif verdict == "REWORK" and repeated:
             self._queue_adjudication(repeated, "Blocking findings recur after prior verification.")
         self.save()
 
@@ -382,6 +471,7 @@ class Run:
         record = self.data["tickets"][self.data["current"]]
         if record.get("adjudication"):
             self.data.update(phase="blocked", requires_user_resolution=True,
+                             budget_exhausted="adjudication",
                              blocker="The ticket's single adjudication is exhausted; user resolution is required.")
             return
         record["adjudication"] = {
@@ -439,7 +529,7 @@ class Run:
         if decision == "REVERIFY" and classifications <= {"advisory", "unsupported"}:
             target = "reviewing"
         elif decision == "REPAIR" and "confirmed_blocker" in classifications and "needs_human" not in classifications:
-            target = "rework" if record["attempts"] < 3 else "blocked"
+            target = "rework" if self.attempts_remaining(current) > 0 else "blocked"
         elif decision == "BLOCKED":
             target = "blocked"
         else:
@@ -451,12 +541,15 @@ class Run:
         if target == "blocked":
             self.data.update(requires_user_resolution=True,
                              blocker="Adjudication needs a user decision or no repair attempts remain.")
+            if decision == "REPAIR":
+                self.data["budget_exhausted"] = "ticket_attempts"
         self.save()
 
     def commit_ticket(self):
         self.ensure({"approved"}, checkpoint=True)
         validate_pass(self.data["review"], self.ticket(), self.data["plan"]["checks"],
-                      snapshot(self.repo, [self.record]))
+                      snapshot(self.repo, [self.record]),
+                      self.data["tickets"][self.data["current"]].get("audit_findings", []))
         ticket = self.data["current"]
         path = relative_file(self.repo, ticket)
         transaction = {
@@ -483,6 +576,7 @@ class Run:
         transaction = self.data["transaction"]
         if git(self.repo, "branch", "--show-current") != self.data["branch"]:
             raise WorkflowError("Run belongs to another branch.")
+        self.require_audit_integrity()
         current_head = git(self.repo, "rev-parse", "HEAD")
         status_path = relative_file(self.repo, transaction["path"])
         if current_head == transaction["parent"]:
@@ -494,8 +588,19 @@ class Run:
             excluded = [self.record]
             if transaction["kind"] == "audit":
                 excluded.append(transaction["audit_path"])
+            edits = transaction.get("file_edits", {})
+            excluded.extend(edits)
             if snapshot(self.repo, excluded, include_index=False) != transaction["before_status_snapshot"]:
                 raise WorkflowError("Pending commit files changed; preserve them and request fresh verification.")
+            for name, edit in edits.items():
+                path = relative_file(self.repo, name)
+                current = path.read_text() if path.exists() else None
+                if current not in (edit["before"], edit["after"]):
+                    raise WorkflowError("Pending repair ticket changed; preserve it and investigate.")
+            for name, edit in edits.items():
+                path = relative_file(self.repo, name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(edit["after"])
             if transaction["kind"] == "audit":
                 audit_path = relative_file(self.repo, transaction["audit_path"])
                 content = "# Implementation audit\n\n```json\n" + json.dumps(self.data["audit"], indent=2) + "\n```\n"
@@ -546,12 +651,21 @@ class Run:
         if status_text(status_path) != transaction["new_status"]:
             raise WorkflowError("Status edit is missing from the commit.")
         if transaction["kind"] == "ticket":
-            self.data["tickets"][self.data["current"]]["commit"] = current_head
+            record = self.data["tickets"][self.data["current"]]
+            record["commit"] = current_head
+            record.setdefault("completions", []).append({
+                "commit": current_head, "attempt": record["attempts"],
+                "review_base": record.get("review_base"), "cycle": record.get("repair_cycle"),
+            })
             self.data.update(head=current_head, current=None, phase="ready")
             self.data.pop("transaction")
             self.data.pop("blocker", None)
             self.save()
         else:
+            if transaction["kind"] == "audit":
+                self.data["audits"][-1]["commit"] = current_head
+            elif transaction["kind"] == "repair-plan":
+                self.data["audit_cycles"][-1]["rounds"][-1]["commit"] = current_head
             self.data.update(head=current_head, phase=transaction["target_phase"])
             self.data.pop("transaction")
             self.data.pop("blocker", None)
@@ -561,6 +675,7 @@ class Run:
 
     def finish(self, report):
         self.ensure({"ready"}, checkpoint=True)
+        self.require_outer()
         if any(not item["commit"] for item in self.data["tickets"].values()):
             raise WorkflowError("Required tickets remain unfinished.")
         if report.get("audited_commit") != self.data["head"] or report.get("baseline_commit") != self.data["baseline"]:
@@ -579,16 +694,31 @@ class Run:
                           self.data["plan"]["checks"], self.data["checkpoint"])
         elif not report.get("blocking_findings") and not report.get("unavailable_checks"):
             raise WorkflowError("A failed audit needs its findings or unavailable checks.")
+        identifiers = [finding.get("id") for finding in report.get("blocking_findings", [])]
+        if (any(not isinstance(identifier, str) or not identifier.strip() for identifier in identifiers)
+                or len(identifiers) != len(set(identifiers))):
+            raise WorkflowError("Audit findings need unique, stable identifiers.")
         unexpected = set(git(self.repo, "diff", "--name-only", "HEAD").splitlines()) - {self.record}
         unexpected.update(set(git(self.repo, "diff", "--cached", "--name-only", "HEAD").splitlines()) - {self.record})
         untracked = set(git(self.repo, "ls-files", "--others", "--exclude-standard").splitlines()) - {self.record}
         if unexpected or untracked:
             raise WorkflowError("Uncommitted implementation changes prevent the final audit commit.")
-        audit = str(Path(self.spec).parent / "final-audit.md")
+        number = len(self.data["audits"]) + 1
+        filename = "final-audit.md" if number == 1 else f"final-audit-{number:03d}.md"
+        audit = str(Path(self.spec).parent / filename)
         audit_path = relative_file(self.repo, audit)
         if audit_path.exists():
             raise WorkflowError("An audit report already exists; preserve it and resolve the destination.")
         previous = status_text(relative_file(self.repo, self.spec))
+        cycle = self.data["audit_cycles"][-1]
+        self.data["audits"].append({
+            "number": number, "report": copy.deepcopy(report), "path": audit,
+            "commit": None, "cycle": cycle["number"],
+        })
+        self.data.pop("budget_exhausted", None)
+        self.data.pop("requires_user_resolution", None)
+        if verdict != "PASS" and len(cycle["rounds"]) >= cycle["round_limit"]:
+            self.data.update(budget_exhausted="audit_rounds", requires_user_resolution=True)
         transaction = {
             "kind": "audit", "path": self.spec, "old_status": previous,
             "new_status": self.data["plan"].get("finished_spec", "done") if verdict == "PASS" else previous,
@@ -601,6 +731,195 @@ class Run:
         self.data.update(phase="committing", transaction=transaction, audit=report)
         self.save()
         return self.reconcile_commit()
+
+    @staticmethod
+    def repair_allowance(record, cycle):
+        if record.get("repair_cycle") == cycle:
+            return
+        if record.get("adjudication"):
+            record.setdefault("adjudications", []).append({
+                "cycle": record.get("repair_cycle"), "report": record.pop("adjudication"),
+            })
+        record.update(repair_cycle=cycle, attempt_start=record["attempts"],
+                      attempt_limit=record["attempts"] + 3)
+
+    def repair_audit(self, report):
+        self.ensure({"audit-blocked"}, checkpoint=True)
+        self.require_handoff(report)
+        audit = self.data["audits"][-1]
+        cycle = self.data["audit_cycles"][-1]
+        if (report.get("audit_number") != audit["number"] or audit["commit"] != self.data["head"]
+                or audit["report"]["verdict"] == "PASS"):
+            raise WorkflowError("Repair planning must identify the latest failed audit and its commit.")
+        if len(cycle["rounds"]) >= cycle["round_limit"]:
+            raise WorkflowError("Audit repair rounds exhausted; explicit user continuation is required.")
+        findings = report.get("findings", [])
+        identifiers = [finding.get("id") for finding in findings]
+        expected = {finding["id"] for finding in audit["report"].get("blocking_findings", [])}
+        if (len(identifiers) != len(set(identifiers)) or set(identifiers) != expected
+                or any(finding.get("classification") not in {
+                    "confirmed_blocker", "advisory", "unsupported", "needs_human",
+                } or not finding.get("reference") or not finding.get("evidence") for finding in findings)):
+            raise WorkflowError("Classify every audit finding with its requirement or rule and concrete evidence.")
+        if any(finding["classification"] == "needs_human" for finding in findings):
+            raise WorkflowError("Resolve the recorded requirements decision before planning automatic repairs.")
+        if audit["report"].get("unavailable_checks") and not report.get("check_resolution"):
+            raise WorkflowError("Record how unavailable required checks were restored; continuation cannot waive them.")
+        confirmed = {finding["id"] for finding in findings if finding["classification"] == "confirmed_blocker"}
+        changes = report.get("tickets", [])
+        assigned = [identifier for ticket in changes for identifier in ticket.get("finding_ids", [])]
+        if len(assigned) != len(set(assigned)) or set(assigned) != confirmed:
+            raise WorkflowError("Assign every confirmed audit finding to exactly one repair ticket.")
+        if any(cycle["finding_attempts"].get(identifier, 0) >= 3 for identifier in confirmed):
+            self.data.update(budget_exhausted="ticket_attempts", requires_user_resolution=True)
+            self.save()
+            raise WorkflowError("Audit finding attempts exhausted; a new ticket cannot reset its allowance.")
+        updated = copy.deepcopy(self.data)
+        plan = updated["plan"]
+        known = {ticket["path"]: ticket for ticket in plan["tickets"]}
+        edits = {}
+        reserved = {self.spec, self.record, *(item["path"] for item in self.data["audits"])}
+        for change in changes:
+            name = change["path"]
+            path = relative_file(self.repo, name)
+            if (name in reserved or name in edits or str(Path(name)) != name
+                    or any(part in {"..", ".git"} for part in Path(name).parts)
+                    or not change.get("finding_ids") or not change.get("requirements")
+                    or not set(change["requirements"]) <= set(plan["requirements"])):
+                raise WorkflowError("Repair tickets need distinct paths, audit findings and approved PRD requirements.")
+            if change.get("action") == "reopen":
+                if name not in known or not updated["tickets"][name]["commit"]:
+                    raise WorkflowError("Only a completed ticket in this plan can be reopened.")
+                if status_text(path) != plan.get("finished_ticket", "closed"):
+                    raise WorkflowError("Completed ticket status differs from the saved run.")
+                before = path.read_text()
+                after = re.sub(r"^Status: .+$", lambda match: f"Status: {plan.get('ready_ticket', 'ready-for-agent')}",
+                               before, count=1, flags=re.MULTILINE)
+                record = updated["tickets"][name]
+                if not record.get("completions"):
+                    record["completions"] = [{
+                        "commit": record["commit"], "attempt": record["attempts"],
+                        "review_base": record.get("review_base"), "cycle": record.get("repair_cycle"),
+                    }]
+                record["commit"] = None
+                record.pop("review_base", None)
+            elif change.get("action") == "create":
+                if name in known or path.exists() or git(self.repo, "ls-files", "--", name):
+                    raise WorkflowError("New repair ticket would overwrite an existing file or planned ticket.")
+                criteria = change.get("criteria", [])
+                if (change.get("execution") != "AFK" or not criteria
+                        or any(not isinstance(criterion, str) or not criterion.strip() for criterion in criteria)
+                        or len(criteria) != len(set(criteria))
+                        or change.get("kind", "behavior") not in {"behavior", "documentation"}
+                        or (change.get("kind", "behavior") == "behavior" and not change.get("seams"))):
+                    raise WorkflowError("New repair tickets need AFK criteria and approved testing boundaries.")
+                after = change.get("content", "")
+                if re.findall(r"^Status: (.+)$", after, flags=re.MULTILINE) != [
+                    plan.get("ready_ticket", "ready-for-agent"),
+                ]:
+                    raise WorkflowError("New repair ticket content needs exactly one ready Status line.")
+                if not set(change.get("related_tickets", [])) <= set(known):
+                    raise WorkflowError("Related repair tickets must identify existing planned work.")
+                ticket = {key: copy.deepcopy(change[key]) for key in (
+                    "path", "execution", "kind", "criteria", "seams", "blocked_by",
+                    "requirements", "related_tickets",
+                ) if key in change}
+                plan["tickets"].append(ticket)
+                known[name] = ticket
+                record = {"attempts": 0, "commit": None, "preexisting": False, "findings": [],
+                          "implementer": None, "history": []}
+                updated["tickets"][name] = record
+                before = None
+            else:
+                raise WorkflowError("Repair work must reopen a completed ticket or create a new one.")
+            self.repair_allowance(record, cycle["number"])
+            record["audit_findings"] = change["finding_ids"]
+            if record["attempts"] >= record["attempt_limit"]:
+                self.data.update(budget_exhausted="ticket_attempts", requires_user_resolution=True)
+                self.save()
+                raise WorkflowError("Ticket repair attempts exhausted in this allowance.")
+            record["findings"] = [finding for finding in audit["report"]["blocking_findings"]
+                                  if finding["id"] in change["finding_ids"]]
+            audit_link = os.path.relpath(self.repo / audit["path"], path.parent)
+            after += (
+                f"\n## Audit repair {audit['number']}\n\n"
+                f"Audit: [{audit['path']}]({audit_link})\n"
+                f"Findings: {', '.join(change['finding_ids'])}\n"
+                f"Requirements: {', '.join(change['requirements'])}\n"
+            )
+            edits[name] = {"before": before, "after": after}
+        validate_graph(plan["tickets"])
+        changed = set(git(self.repo, "diff", "--name-only", "HEAD").splitlines())
+        changed.update(git(self.repo, "diff", "--cached", "--name-only", "HEAD").splitlines())
+        changed.update(git(self.repo, "ls-files", "--others", "--exclude-standard").splitlines())
+        if changed - {self.record}:
+            raise WorkflowError("Audit repair planning requires the unchanged audited checkout.")
+        updated["audit_cycles"][-1]["rounds"].append({
+            "audit_number": audit["number"], "plan": copy.deepcopy(report), "commit": None,
+        })
+        previous = status_text(relative_file(self.repo, self.spec))
+        updated.update(
+            phase="committing", current=None, review=None, implementation=None,
+            transaction={
+                "kind": "repair-plan", "path": self.spec, "old_status": previous, "new_status": previous,
+                "parent": self.data["head"], "message": f"Plan audit repairs for {Path(self.spec).stem}",
+                "paths": [self.record, *edits], "file_edits": edits, "status_restored": True,
+                "before_status_snapshot": snapshot(self.repo, [self.record, *edits], include_index=False),
+                "target_phase": "ready",
+            },
+        )
+        updated.pop("budget_exhausted", None)
+        updated.pop("requires_user_resolution", None)
+        self.data = updated
+        self.save()
+        return self.reconcile_commit()
+
+    def continue_audit(self, report):
+        self.ensure({"audit-blocked", "blocked", "rework"}, checkpoint=True)
+        self.require_handoff(report)
+        cycle = self.data["audit_cycles"][-1]
+        current = self.data["current"]
+        exhausted = self.data.get("budget_exhausted")
+        if current and self.attempts_remaining(current) <= 0:
+            exhausted = "ticket_attempts"
+        if self.data["phase"] == "audit-blocked" and len(cycle["rounds"]) >= cycle["round_limit"]:
+            exhausted = "audit_rounds"
+        if (report.get("cycle") != cycle["number"] or not report.get("user_authorization")
+                or not exhausted or not self.data["audits"]
+                or self.data["audits"][-1]["report"]["verdict"] == "PASS"):
+            raise WorkflowError("An exhausted audit allowance needs fresh, explicit user continuation for this cycle.")
+        if current and not self.data["tickets"][current].get("repair_cycle"):
+            raise WorkflowError("This blocker belongs to initial implementation, not audit repairs.")
+        if current:
+            record = self.data["tickets"][current]
+            attempt = record["history"][-1]
+            implementation = attempt.get("implementation") or {}
+            reviews = attempt.get("reviews", [])
+            adjudication = record.get("adjudication", {}).get("decision") or {}
+            if ((implementation.get("outcome") == "BLOCKED"
+                 or (reviews and reviews[-1].get("verdict") == "BLOCKED")
+                 or adjudication.get("decision") == "BLOCKED") and not report.get("blocker_resolution")):
+                raise WorkflowError("Record how the non-budget blocker was resolved before continuing repairs.")
+        updated = copy.deepcopy(self.data)
+        renewed = audit_cycle(cycle["number"] + 1, copy.deepcopy(report), cycle["round_limit"])
+        unfinished = [name for name, record in updated["tickets"].items() if not record["commit"]]
+        for name in unfinished:
+            record = updated["tickets"][name]
+            if not record.get("audit_findings"):
+                raise WorkflowError("Only remaining audit repair work receives a new allowance.")
+            self.repair_allowance(record, renewed["number"])
+        if unfinished:
+            renewed["rounds"].append({
+                "audit_number": updated["audits"][-1]["number"], "carried_tickets": unfinished,
+                "evidence": report["evidence"],
+            })
+            updated["phase"] = "rework" if current else "ready"
+        updated["audit_cycles"].append(renewed)
+        updated.update(review=None, implementation=None)
+        for name in ("budget_exhausted", "requires_user_resolution", "blocker"):
+            updated.pop(name, None)
+        self.data = updated
+        self.save()
 
     def invalidate(self, report):
         if (not self.data or self.data["phase"] != "committing"
@@ -633,7 +952,7 @@ class Run:
         current = self.data["current"]
         if not current:
             raise WorkflowError("Inspect this non-ticket blocker before changing its state.")
-        if (self.data.get("requires_user_resolution") or self.data["tickets"][current]["attempts"] >= 3):
+        if self.data.get("requires_user_resolution") or self.attempts_remaining(current) <= 0:
             if not resolution.get("user_authorization"):
                 raise WorkflowError("The automatic budget is exhausted; record the user's explicit resolution.")
         target = resolution.get("next_phase")
@@ -644,13 +963,14 @@ class Run:
                     or implementation.get("outcome") != "READY_FOR_REVIEW"):
                 raise WorkflowError("No completed implementation for this ticket and attempt exists to verify.")
         elif target == "rework":
-            if self.data["tickets"][current]["attempts"] >= 3:
+            if self.attempts_remaining(current) <= 0:
                 raise WorkflowError("Attempt limit remains exhausted; resolution cannot reset it.")
         else:
             raise WorkflowError("Resolution can resume verification or an available repair.")
         self.data.setdefault("resolutions", []).append(resolution)
         self.data["phase"] = target
         self.data.pop("requires_user_resolution", None)
+        self.data.pop("budget_exhausted", None)
         self.save()
 
 
@@ -801,7 +1121,7 @@ def main():
     parser.add_argument("action", choices=[
         "launch", "prepare", "init", "status", "snapshot", "begin", "implemented",
         "reviewed", "dispute", "adjudicate", "commit", "finish", "checkpoint",
-        "reconcile-commit", "resolve", "invalidate", "doctor",
+        "reconcile-commit", "resolve", "invalidate", "doctor", "repair-audit", "continue-audit",
     ])
     parser.add_argument("spec", nargs="?")
     parser.add_argument("--repo", default=os.getcwd())
@@ -851,6 +1171,10 @@ def main():
                 print(run.commit_ticket())
             elif arguments.action == "finish":
                 print(run.finish(report))
+            elif arguments.action == "repair-audit":
+                print(run.repair_audit(report))
+            elif arguments.action == "continue-audit":
+                run.continue_audit(report)
             elif arguments.action == "reconcile-commit":
                 print(run.reconcile_commit())
             elif arguments.action == "resolve":

@@ -109,9 +109,26 @@ def register_coordinator(repo, spec, identifier):
         entry = owned_entry(repo, spec)
         workflow.verify_checkout_entry(repo, spec)
         if entry.get("coordinator") not in (None, identifier):
-            raise workflow.WorkflowError("This entry already has a coordinator. Stop and resume for a new one.")
+            raise workflow.WorkflowError("Close and release the recorded coordinator before registering another.")
+        if identifier in {item["coordinator"] for item in entry.get("closed_coordinators", [])}:
+            raise workflow.WorkflowError("A closed coordinator cannot be reused; spawn a fresh named coordinator.")
         workflow.validate_coordinator(identifier, entry)
         entry["coordinator"] = identifier
+        workflow.write_json(entry_path(repo), entry)
+
+
+def release_coordinator(repo, spec, report):
+    require_inactive(report)
+    with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
+        entry = owned_entry(repo, spec)
+        workflow.verify_checkout_entry(repo, spec)
+        if not entry.get("coordinator") or report.get("coordinator") != entry["coordinator"]:
+            raise workflow.WorkflowError("Identify the recorded coordinator whose workers have closed.")
+        run = workflow.Run(repo, spec)
+        if run.data:
+            run.ensure({"ready", "audit-blocked", "blocked"}, checkpoint=True)
+        entry.setdefault("closed_coordinators", []).append(dict(report, closed_at=time.time()))
+        entry["coordinator"] = None
         workflow.write_json(entry_path(repo), entry)
 
 
@@ -136,7 +153,9 @@ def recover(repo, spec, report):
 
 def main():
     parser = argparse.ArgumentParser(description="Use the invoking Codex session or launch a dedicated outer session.")
-    parser.add_argument("action", choices=["start", "admit", "coordinator", "status", "stop", "recover"])
+    parser.add_argument("action", choices=[
+        "start", "admit", "coordinator", "release-coordinator", "status", "stop", "recover",
+    ])
     parser.add_argument("spec")
     parser.add_argument("--repo", default=os.getcwd())
     parser.add_argument("--session", choices=["current", "new"])
@@ -163,6 +182,8 @@ def main():
             print(json.dumps(owned_entry(repo, spec), indent=2))
         elif arguments.action == "coordinator":
             register_coordinator(repo, spec, arguments.agent)
+        elif arguments.action == "release-coordinator":
+            release_coordinator(repo, spec, report)
         else:
             recover(repo, spec, report)
         return 0

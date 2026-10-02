@@ -8,7 +8,7 @@ executes the approved plan.
 
 | Role | Responsibility |
 | --- | --- |
-| Outer session | Preflight, decisions, final audit and report |
+| Outer session | Preflight, decisions, specification audits, repair plans and continuation |
 | implementation_coordinator | Dependency order, handoffs, ticket closure and local commits |
 | ticket_implementer | TDD implementation and scoped repairs |
 | ticket_verifier | Independent ticket verification |
@@ -98,8 +98,8 @@ Additional runtime agent slots never authorize overlapping ticket work.
    - `BLOCKED`: missing decisions, unavailable checks, permission failures or
      another obstacle that implementation cannot resolve within scope.
    Invalid, incomplete or contradictory reports are not a pass.
-7. Allow the initial implementation and at most two repair attempts. The
-   count survives interruption. Repeated findings without progress can stop
+7. Allow the initial implementation and at most two repair attempts within the
+   recorded allowance. Counts survive interruption. Repeated findings without progress can stop
    earlier. A blocker or exhausted attempts stops the whole run, including
    otherwise independent tickets.
 8. On `PASS`, confirm the reviewed changes still match the checkout, inspect
@@ -120,7 +120,9 @@ unrelated improvements do not create repair work.
 
 ## Adjudication
 
-Each ticket gets at most one outer-agent adjudication across the whole run.
+Each ticket gets at most one outer-agent adjudication within its allowance.
+Initial implementation has its own allowance. Audit-repair allowances and
+explicit human renewal are defined in [audit-repairs.md](audit-repairs.md).
 The guard queues it when a blocking finding ID recurs. This is deliberately
 conservative: the outer agent determines whether a repair made sufficient
 progress. Keep IDs stable for the same underlying problem; changing an ID does
@@ -150,8 +152,9 @@ Adjudication changes neither acceptance criteria nor required checks. The fresh
 verifier must still meet the full PASS contract. It should not repeat rejected
 preferences as blockers without new evidence; genuinely discovered defects
 still block. Another repeated or disputed finding after adjudication stops the
-whole run for the user, not another adjudication. Explicit user resolution may
-resume eligible work but never resets the adjudication or implementation budget.
+whole run for the user, not another adjudication. Ordinary `resolve` resumes
+eligible work without renewing either budget. Exhausted audit repairs can receive
+a new recorded allowance through explicit human continuation.
 
 ## Recovery
 
@@ -180,7 +183,8 @@ consumes the next attempt; interruption never grants extra attempts.
 ## Final audit
 
 After all required ticket commits exist, the coordinator reports the results
-and releases its active agent slot. The outer agent starts `spec_auditor`.
+and closes its active agent slot. In current-session mode the outer releases
+its registration as described in [entry.md](entry.md), then starts `spec_auditor`.
 
 The auditor reviews the whole change from the recorded baseline against the
 PRD, all completed tickets and relevant repository rules. It verifies
@@ -192,11 +196,12 @@ Return the audited commit, requirements-to-evidence mapping, performed and
 reused checks, blocking findings, advisory findings and unavailable checks.
 The auditor reports findings and does not change implementation or tracker files.
 
-The outer agent saves `final-audit.md` beside the PRD and commits that report
-locally even when there are blockers. Mark the PRD finished only when required
-verification is complete and no blocking finding remains. Advisory findings
-do not block completion. Leave completed tickets closed until the user decides
-how to handle audit findings. Do not start an automatic audit-repair cycle.
+The outer commits every audit, including failed audits. Only a complete PASS
+finishes the PRD. Advisory findings do not block completion. Failed audits enter
+the [bounded audit-repair workflow](audit-repairs.md): the outer assesses findings,
+reopens or creates repair tickets, and delegates the updated plan to a fresh
+coordinator. The next audit reviews the whole specification and prior findings
+against the repaired code. Preserve stable finding IDs and earlier reports.
 
-Report completed commits, audit outcome, remaining blockers and the report
-path to the user.
+At completion or a stop, report completed commits, audit outcome, allowance
+usage, remaining blockers and the latest report path.

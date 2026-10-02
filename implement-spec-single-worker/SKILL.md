@@ -1,6 +1,6 @@
 ---
 name: implement-spec-single-worker
-description: Execute an approved AFK PRD sequentially with a coordinator, TDD implementers, independent verification, local commits and a final audit.
+description: Execute an approved AFK PRD sequentially with TDD implementers, independent verification, local commits and bounded repairs after specification audits.
 ---
 
 # Sequential implementation
@@ -34,6 +34,8 @@ Resolve `session` from the invocation, then `default_session` in
 Use `branch=name` to select an existing branch or create it from the current
 commit. Otherwise create a branch on `main` and reuse a non-main branch.
 `resume` preserves the saved run, unfinished changes and retry budgets.
+After exhausted audit repairs, an explicit user instruction to continue grants
+a new bounded allowance through [audit recovery](references/audit-repairs.md).
 No remembered Python syntax is required from the user.
 
 Role models and efforts come only from `settings.toml`. Generated profiles and
@@ -75,13 +77,17 @@ completed commits and blockers here so the user can follow the work.
    must be idle with every leaf closed. Record the evidence-backed decision
    through the guard, then return it to the open coordinator. Missing decisions
    and further unresolved disagreement return to the user.
-6. After all required ticket commits exist, close the coordinator. Spawn one
+6. After all required ticket commits exist, close the coordinator and release its
+   registration in current-session mode. Spawn one
    native `spec_auditor` with the complete PRD, ticket set, baseline, commit list,
-   repository rules and verification evidence.
-7. Close the auditor when it returns. Save and commit its report with the
-   guard's `finish` command. Mark the PRD finished only after a complete audit
-   without blockers. Report findings without automatically repairing them or
-   reopening completed tickets.
+   repository rules, prior audits and verification evidence.
+7. Close the auditor and save its report with `finish`. A complete PASS finishes
+   the PRD. Otherwise follow [audit repairs](references/audit-repairs.md): assess
+   every finding, reopen deficient tickets or create linked repair tickets, and
+   hand the saved plan to a fresh coordinator using step 4. Repeat the whole-spec
+   audit after repairs. At the allowance limit, save the remaining work and return
+   it to the user. Explicit human continuation grants a new recorded allowance;
+   interruption or ordinary resume preserves the existing budget.
 
 ## Coordinator
 
@@ -97,8 +103,10 @@ Never resume a closed implementer: the tested runtime changes its model settings
 
 Wait for the implementer, record its result, and close its active agent slot.
 Start a fresh `ticket_verifier` for every attempt. Close the verifier before
-starting a repair. The initial attempt and two repairs are the maximum,
-including across interrupted sessions.
+starting a repair. The initial attempt and two repairs are the maximum within
+the current allowance, including across interrupted sessions. Use the guard's
+saved attempt limits; lifetime attempt numbers can exceed three after authorized
+audit repairs.
 
 Use structured verdicts. `PASS` permits the guard's ticket commit after checking
 the exact diff; `REWORK` permits a bounded repair; `BLOCKED` stops the whole run.
@@ -108,7 +116,7 @@ be treated as a pass. Advisory suggestions do not authorize scope expansion.
 Before another repair, check the guard's phase. `adjudicating` requires the outer
 agent's decision. Report disputed findings with `dispute`; preserve the
 verifier's original report. Keep your thread open but idle during adjudication.
-The decision cannot grant PASS or reset attempts.
+The decision cannot grant PASS or renew an allowance.
 
 Keep the coordinator open while its child runs. The coordinator is responsible
 for sequential execution even when Codex offers additional agent slots. This

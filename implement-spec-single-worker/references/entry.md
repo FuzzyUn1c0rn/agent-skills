@@ -50,6 +50,12 @@ run and unfinished changes; do not execute the old diagnostic instructions.
    `entry.py coordinator SPEC --agent ID` after its ready response and before
    sending it the plan. Only this outer and that registered native child may
    change run state. Old owners and other sessions are rejected.
+   Before each whole-spec audit, close the coordinator and all its children, then
+   call `entry.py release-coordinator SPEC --report /tmp/coordinator-closed.json`.
+   Include the recorded `coordinator` ID, `previous_workers_inactive: true` and
+   concrete closure `evidence`. This retires its registration while retaining the
+   checkout lock. After audit repair planning, register a fresh coordinator with
+   the same ready-response procedure. Closed coordinator IDs cannot be reused.
 5. On completion, blocker or preflight failure, close every workflow agent.
    Save a JSON report outside the checkout containing
    `previous_workers_inactive: true` and concrete `evidence`. Call
@@ -85,6 +91,11 @@ Admission records the handover to this session without accepting changed code,
 refreshing checkpoints, resetting budgets or resolving blockers. Reconcile the
 saved state using [commands.md](commands.md) before fresh delegation. An
 unfinished implementation still consumes its original attempt.
+
+A resume also supports a saved failed-audit stop. It retains audits, ticket
+history and allowance usage. To grant new rounds after exhaustion, the outer
+records an explicit user instruction with `continue-audit` following
+[audit-repairs.md](audit-repairs.md). Admission itself never grants that allowance.
 
 ## New session
 

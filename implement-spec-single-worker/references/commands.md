@@ -141,13 +141,14 @@ checkpoint and use `resolve SPEC --report /tmp/resolution.json` with:
 ```
 
 `reviewing` reruns independent verification of an existing implementation.
-`rework` allows another implementation attempt only when the original limit
-has not been exhausted. Resolution never resets attempts.
-When `requires_user_resolution` is true or three attempts are exhausted, include `user_authorization`
+`rework` allows another implementation attempt only when the current allowance
+has not been exhausted. Resolution never renews an allowance.
+When `requires_user_resolution` is true or the attempt allowance is exhausted, include `user_authorization`
 recording the user's explicit decision. A new agent's opinion or an automatic
 retry is not authorization. Resolving the blocker does not replenish adjudication.
 An interrupted pending adjudication resumes from its saved request; do not
-checkpoint changed code into that request or restart its budget.
+checkpoint changed code into that request or restart its budget. Explicit human
+continuation of exhausted audit repairs uses `continue-audit`, described below.
 For an interrupted implementer without a completed result, first use `implemented`
 with the current ticket, attempt, `outcome: "BLOCKED"` and interruption evidence.
 After reconciliation, resolve to `rework`. Do not resume the old sub-agent.
@@ -155,6 +156,13 @@ After reconciliation, resolve to `rework`. Do not resume the old sub-agent.
 After all required tickets are committed, close the coordinator and run the
 final auditor. Call `finish SPEC --report /tmp/audit.json`. Its `requirements`
 must cover the plan's PRD requirement IDs; its snapshot and commits must match.
-The guard saves `final-audit.md`, commits the report and execution record, and
-sets the PRD's finished label only for a complete PASS. Existing audit reports
-are preserved. There is no automatic repair cycle after this audit.
+The guard commits the report and execution record, and sets the PRD's finished
+label only for a complete PASS. Reports have distinct paths, beginning with
+`final-audit.md`; `status` identifies the latest one.
+
+After failure, the outer uses `repair-audit SPEC --report /tmp/audit-repairs.json`
+to commit reopened or new repair tickets and the updated plan. After exhaustion,
+explicit human continuation uses
+`continue-audit SPEC --report /tmp/audit-continuation.json`. Ordinary `resume`
+does not replenish allowances. Read [audit-repairs.md](audit-repairs.md) for the
+decision rules, report schemas, round limits and recovery procedure.

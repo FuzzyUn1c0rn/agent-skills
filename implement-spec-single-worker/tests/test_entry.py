@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import datetime
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -298,11 +299,115 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(0, admitted.returncode, admitted.stderr)
         authorized = self.guard_result(dict(self.env, CODEX_THREAD_ID="actual-coordinator"))
         self.assertIn("/missing-plan", authorized.stderr)
+        plan = self.root / "coordinator-init.json"
+        plan.write_text(json.dumps({"spec": "PRD.md"}))
+        rejected_init = subprocess.run(
+            [sys.executable, str(self.skill / "scripts/workflow.py"), "init", "PRD.md",
+             "--repo", str(self.repo), "--plan", str(plan)],
+            env=dict(self.env, CODEX_THREAD_ID="actual-coordinator"),
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertEqual(2, rejected_init.returncode)
+        self.assertIn("Only the admitted outer", rejected_init.stderr)
+        self.assertIsNone(workflow.Run(self.repo, "PRD.md").data)
         unauthorized = self.guard_result(dict(self.env, CODEX_THREAD_ID="other-coordinator"))
         self.assertIn("owner", unauthorized.stderr)
         replaced = subprocess.run(command + ["other-coordinator"], env=self.env,
                                   capture_output=True, text=True, timeout=5)
         self.assertEqual(2, replaced.returncode)
+        missing_evidence = self.command_result("release-coordinator", {"coordinator": "actual-coordinator"})
+        self.assertEqual(2, missing_evidence.returncode)
+        wrong_coordinator = self.command_result("release-coordinator", {
+            "coordinator": "other-coordinator", "previous_workers_inactive": True,
+            "evidence": "All worker threads closed.",
+        })
+        self.assertEqual(2, wrong_coordinator.returncode)
+        released = self.command_result("release-coordinator", {
+            "coordinator": "actual-coordinator", "previous_workers_inactive": True,
+            "evidence": "The recorded coordinator and every child are confirmed closed.",
+        })
+        self.assertEqual(0, released.returncode, released.stderr)
+        former = self.guard_result(dict(self.env, CODEX_THREAD_ID="actual-coordinator"))
+        self.assertIn("owner", former.stderr)
+        reused = subprocess.run(command + ["actual-coordinator"], env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(2, reused.returncode)
+        replacement = subprocess.run(command + ["other-coordinator"], env=self.env,
+                                     capture_output=True, text=True, timeout=5)
+        self.assertEqual(0, replacement.returncode, replacement.stderr)
+        authorized = self.guard_result(dict(self.env, CODEX_THREAD_ID="other-coordinator"))
+        self.assertIn("/missing-plan", authorized.stderr)
+        entry = json.loads(self.command_result("status").stdout)
+        self.assertEqual("actual-coordinator", entry["closed_coordinators"][0]["coordinator"])
+
+    def test_audit_repair_and_continuation_commands_use_the_admitted_outer(self):
+        (self.repo / "ticket.md").write_text("Status: ready-for-agent\n")
+        workflow.git(self.repo, "add", "ticket.md")
+        workflow.git(self.repo, "commit", "-m", "Ticket")
+        self.start()
+        self.assertEqual(0, self.command_result("admit").returncode)
+        with patch.dict(os.environ, {"CODEX_THREAD_ID": "selected-outer"}):
+            run = workflow.Run(self.repo, "PRD.md")
+            run.create({
+                "spec": "PRD.md", "checks": [["suite"]], "requirements": ["US1"],
+                "approval_evidence": "Approved documentation",
+                "tickets": [{"path": "ticket.md", "execution": "AFK", "criteria": ["AC1"],
+                             "kind": "documentation"}],
+            })
+            for round_number in range(3):
+                run.begin("ticket.md")
+                record = run.data["tickets"]["ticket.md"]
+                run.implemented({
+                    "outcome": "READY_FOR_REVIEW", "ticket": "ticket.md", "attempt": record["attempts"],
+                    "tdd_not_applicable_reason": "Documentation repair", "checks": ["Links checked"],
+                })
+                run.reviewed({
+                    "verdict": "PASS", "ticket": "ticket.md", "attempt": record["attempts"],
+                    "base_commit": record["review_base"], "reviewed_snapshot": run.data["checkpoint"],
+                    "criteria": [{"id": "AC1", "satisfied": True, "evidence": "Checked documentation"}],
+                    "checks": [{"command": ["suite"], "exit_code": 0, "evidence": "Passed"}],
+                    "blocking_findings": [], "unavailable_checks": [],
+                    "resolved_findings": [{"id": "A1", "evidence": "Correction checked"}],
+                })
+                run.commit_ticket()
+                run.finish({
+                    "verdict": "REWORK", "audited_commit": run.data["head"],
+                    "baseline_commit": run.data["baseline"], "reviewed_snapshot": run.data["checkpoint"],
+                    "blocking_findings": [{"id": "A1", "evidence": "Integration wording missing"}],
+                    "unavailable_checks": [],
+                })
+                report = {
+                    "audit_number": len(run.data["audits"]), "reviewed_snapshot": run.data["checkpoint"],
+                    "previous_workers_inactive": True, "evidence": "All review threads closed.",
+                    "findings": [{"id": "A1", "classification": "confirmed_blocker",
+                                  "reference": "PRD.md#US1", "evidence": "Missing requirement text."}],
+                    "tickets": [{"action": "reopen", "path": "ticket.md", "finding_ids": ["A1"],
+                                 "requirements": ["US1"]}],
+                }
+                report_path = self.root / "audit-command.json"
+                report_path.write_text(json.dumps(report))
+                command = [
+                    sys.executable, str(self.skill / "scripts/workflow.py"), "repair-audit", "PRD.md",
+                    "--repo", str(self.repo), "--report", str(report_path),
+                ]
+                result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=5)
+                if round_number < 2:
+                    self.assertEqual(0, result.returncode, result.stderr)
+                else:
+                    self.assertEqual(2, result.returncode)
+                    self.assertIn("exhausted", result.stderr)
+                run = workflow.Run(self.repo, "PRD.md")
+            report_path.write_text(json.dumps({
+                "cycle": 1, "reviewed_snapshot": run.data["checkpoint"],
+                "previous_workers_inactive": True, "evidence": "User reviewed the stopped run.",
+                "user_authorization": "Continue working on the audit defects.",
+            }))
+            command[2] = "continue-audit"
+            result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=5)
+            self.assertEqual(0, result.returncode, result.stderr)
+            restored = workflow.Run(self.repo, "PRD.md")
+            self.assertEqual(2, restored.data["audit_cycles"][-1]["number"])
+            self.assertEqual(3, len(restored.data["audits"]))
 
 
 if __name__ == "__main__":

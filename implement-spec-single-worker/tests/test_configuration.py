@@ -39,6 +39,16 @@ class ConfigurationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 configuration.load(path)
 
+    def test_audit_repair_limit_requires_positive_integer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.toml"
+            original = configuration.SETTINGS.read_text()
+            for value in ("0", "-1", "true", '"two"'):
+                with self.subTest(value=value):
+                    path.write_text(original.replace("audit_repair_rounds = 2", f"audit_repair_rounds = {value}"))
+                    with self.assertRaisesRegex(ValueError, "audit_repair_rounds"):
+                        configuration.load(path)
+
     def test_install_and_runtime_follow_changed_settings_without_changing_outer_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

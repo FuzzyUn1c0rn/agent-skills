@@ -55,6 +55,12 @@ concrete in-scope finding. `BLOCKED` explains the missing decision or capability
 A finding includes an identifier, affected path, evidence, violated requirement
 or rule, and the correction needed. Keep identifiers stable across attempts.
 
+For audit repair work, PASS also includes `resolved_findings`, with one
+`{"id": "AUDIT-F01", "evidence": "Actual code and regression-test evidence"}`
+entry for every ID assigned in the ticket record's `audit_findings`. Check the
+repair itself as well as every original criterion. Prior PASS results are
+context, not proof that the defect is corrected.
+
 ## Adjudication
 
 Only the outer agent supplies this decision, with the coordinator
@@ -93,3 +99,9 @@ Use the verifier structure with `audited_commit`, `baseline_commit` and
 Identify evidence reused from earlier verification and why it remains valid.
 Unavailable required checks prevent `PASS`. The outer agent saves the report
 and owns any status edits and local commit.
+
+On subsequent audits, inspect prior findings, the outer's dispositions and all
+repair commits while reviewing the whole PRD from the original baseline. Use
+the same finding ID when the underlying defect persists. The outer plans repairs
+through [audit-repairs.md](audit-repairs.md); the auditor remains independent and
+leaves source and ticket files unchanged.

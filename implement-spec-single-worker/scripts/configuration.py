@@ -15,6 +15,9 @@ def load(path=None):
     settings = tomllib.loads(Path(path or SETTINGS).read_text())
     if settings.get("default_session") not in {"current", "new"}:
         raise ValueError("default_session must be current or new.")
+    rounds = settings.setdefault("audit_repair_rounds", 2)
+    if type(rounds) is not int or rounds < 1:
+        raise ValueError("audit_repair_rounds must be a positive integer.")
     if set(settings.get("roles", {})) != set(DEPTHS):
         raise ValueError("Settings must define exactly the four workflow roles.")
     for role in [settings.get("launcher", {}), *settings["roles"].values()]:

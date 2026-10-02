@@ -1,4 +1,5 @@
 default_session = "current"
+audit_repair_rounds = 2
 
 [launcher]
 model = "openai.gpt-6-astra"
