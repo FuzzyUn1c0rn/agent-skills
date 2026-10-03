@@ -66,9 +66,9 @@ def install(source, destination, codex_home):
     if not tdd.is_file():
         raise RuntimeError(f"Required TDD skill is missing: {tdd}")
     replacements = {
-        "@SKILL_ROOT@": str(destination),
-        "@AGENT_ROOT@": str(agent_root),
-        "@TDD_SKILL@": str(tdd),
+        "@SKILL_ROOT@": destination.as_posix(),
+        "@AGENT_ROOT@": agent_root.as_posix(),
+        "@TDD_SKILL@": tdd.as_posix(),
     }
     files = {}
     for path in source.rglob("*"):
