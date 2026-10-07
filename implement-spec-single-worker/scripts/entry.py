@@ -148,7 +148,7 @@ def admit(repo, spec, report=None):
             selected = workflow.choose_branch(repo, spec, entry["branch"] if entry["mode"] == "dedicated" else entry["requested_branch"])
             if workflow.Run(repo, spec).data:
                 raise workflow.WorkflowError("Run already exists on this branch. Stop, then start with --resume.")
-        workflow.relative_file(repo, spec).read_text()
+        workflow.relative_file(repo, spec).read_text(encoding="utf-8")
         entry.update(phase="admitted", admitted_at=time.time(), branch=selected, outer_session=owner)
         workflow.write_json(entry_path(repo), entry)
         return entry
@@ -230,7 +230,7 @@ def main():
         spec = workflow.repository_path(
             spec_path.resolve().relative_to(repo).as_posix() if spec_path.is_absolute() else arguments.spec,
         )
-        report = json.loads(Path(arguments.report).read_text()) if arguments.report else None
+        report = json.loads(Path(arguments.report).read_text(encoding="utf-8")) if arguments.report else None
         if arguments.action == "start":
             mode = arguments.session or configuration.load()["default_session"]
             if mode == "new":
