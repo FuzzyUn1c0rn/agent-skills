@@ -3,11 +3,11 @@ import subprocess
 import re
 import hashlib
 import os
-import fcntl
 import json
 import tempfile
 import argparse
 import sys
+import platform_support
 import tomllib
 import copy
 from contextlib import contextmanager
@@ -21,16 +21,17 @@ class WorkflowError(RuntimeError):
     pass
 
 
+class LockContended(WorkflowError, platform_support.LockContended):
+    pass
+
+
 @contextmanager
 def exclusive(path):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise WorkflowError("Another workflow operation owns this checkout.") from error
-        yield handle.fileno()
+    try:
+        with platform_support.exclusive(path) as descriptor:
+            yield descriptor
+    except platform_support.LockContended as error:
+        raise LockContended(str(error)) from error
 
 
 def git(repo, *arguments):
@@ -1055,7 +1056,7 @@ def verify_checkout_entry(repo, spec):
     try:
         with exclusive(git_home(repo) / "launch.lock"):
             pass
-    except WorkflowError:
+    except LockContended:
         locked = True
     if not locked:
         raise WorkflowError("No active checkout lock. Start the workflow entry before changing run state.")
@@ -1185,7 +1186,7 @@ def main():
                 run.checkpoint(arguments.implementer)
             print(json.dumps(run.data, indent=2))
         return 0
-    except (WorkflowError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+    except (WorkflowError, platform_support.LockError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         return 2
 

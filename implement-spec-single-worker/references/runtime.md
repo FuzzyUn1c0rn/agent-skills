@@ -7,6 +7,36 @@ the outer agent. A separate launcher is available only through `session=new`.
 
 ## Install and configure
 
+Use Python 3.11 or later in each environment. The helpers use the standard-library
+TOML parser and Portalocker for exclusive checkout locks. The dependency range in
+`requirements.txt` starts at the verified Portalocker 4.4.0 release and excludes
+version 5. Exclusive locks need no optional dependency extras.
+
+Select an interpreter and install the requirements into that same interpreter
+before running the installer. From the skill directory, for example:
+
+```powershell
+py -3.11 -m pip install -r requirements.txt
+py -3.11 scripts/install.py
+```
+
+```sh
+python3 -m pip install -r requirements.txt
+python3 scripts/install.py
+```
+
+An existing virtual environment is also supported: use its Python executable for
+both commands. Missing prerequisites report the selected interpreter and a
+command to repair it. Helper startup and installation never install packages or
+create an environment automatically.
+
+Install separately in native Windows and WSL. Generated profiles and launch
+presets contain absolute paths for their environment; keep each environment's
+skill destination and Codex home local to that environment. Complete or recover
+unfinished runs before upgrading. Existing workflow state is not migrated
+between operating systems, and simultaneous Windows/WSL access to one checkout
+is unsupported.
+
 The agent runs the installer internally when installation or a settings change
 is requested:
 
