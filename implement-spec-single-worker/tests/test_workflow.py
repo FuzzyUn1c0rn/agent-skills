@@ -7,14 +7,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workflow
+from test_support import isolate_environment
 
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
+        isolate_environment(self)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.repo = Path(self.directory.name)
         workflow.git(self.repo, "init", "-b", "main")
+        (self.repo / ".git/hooks").mkdir(exist_ok=True)
         workflow.git(self.repo, "config", "user.name", "Workflow test")
         workflow.git(self.repo, "config", "user.email", "workflow@example.invalid")
         (self.repo / "PRD.md").write_text("Status: ready-for-agent\n")
@@ -29,7 +32,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(branch, workflow.git(self.repo, "branch", "--show-current"))
         self.assertEqual(baseline, workflow.git(self.repo, "rev-parse", "HEAD"))
 
-    def test_snapshot_includes_untracked_content_and_modes(self):
+    def test_snapshot_includes_untracked_content(self):
         initial = workflow.snapshot(self.repo)
         source = self.repo / "source.py"
         source.write_text("result = 1\n")
@@ -38,8 +41,16 @@ class WorkflowTests(unittest.TestCase):
         source.write_text("result = 2\n")
         changed = workflow.snapshot(self.repo)
         self.assertNotEqual(added, changed)
-        source.chmod(0o755)
-        self.assertNotEqual(changed, workflow.snapshot(self.repo))
+
+    def test_snapshot_includes_executable_bit_changes_where_supported(self):
+        source = self.repo / "source.py"
+        source.write_bytes(b"result = 1\n")
+        fingerprint = workflow.snapshot(self.repo)
+        before = source.stat().st_mode & 0o111
+        source.chmod(0o755 if not before else 0o644)
+        if source.stat().st_mode & 0o111 == before:
+            self.skipTest("This filesystem does not expose executable-bit changes through chmod.")
+        self.assertNotEqual(fingerprint, workflow.snapshot(self.repo))
 
     def test_second_run_is_rejected_while_first_holds_lock(self):
         lock = self.repo / ".git" / "workflow.lock"
@@ -391,7 +402,7 @@ class WorkflowTests(unittest.TestCase):
         run.begin("ticket.md")
         self.implement_and_review(run, "PASS")
         hook = self.repo / ".git/hooks/pre-commit"
-        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.write_bytes(b"#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
         with self.assertRaises(workflow.WorkflowError):
             run.commit_ticket()
@@ -445,7 +456,7 @@ class WorkflowTests(unittest.TestCase):
     def test_audit_hook_source_edit_prevents_completion(self):
         run = self.completed_run()
         hook = self.repo / ".git/hooks/pre-commit"
-        hook.write_text("#!/bin/sh\nprintf 'result = 99\\n' > source.py\n")
+        hook.write_bytes(b"#!/bin/sh\nprintf 'result = 99\\n' > source.py\n")
         hook.chmod(0o755)
         with self.assertRaises(workflow.WorkflowError):
             run.finish(self.audit_report(run))
@@ -455,7 +466,7 @@ class WorkflowTests(unittest.TestCase):
     def test_rejected_final_commit_can_be_retried(self):
         run = self.completed_run()
         hook = self.repo / ".git/hooks/pre-commit"
-        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.write_bytes(b"#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
         with self.assertRaises(workflow.WorkflowError):
             run.finish(self.audit_report(run))
@@ -555,13 +566,13 @@ class WorkflowTests(unittest.TestCase):
     def test_interruption_after_audit_write_is_recoverable(self):
         run = self.completed_run()
         report = self.audit_report(run)
-        original = Path.write_text
+        original = Path.write_bytes
         def interrupted(path, *arguments, **keywords):
             result = original(path, *arguments, **keywords)
             if path.name == "final-audit.md":
                 raise KeyboardInterrupt()
             return result
-        with patch.object(Path, "write_text", new=interrupted):
+        with patch.object(Path, "write_bytes", new=interrupted):
             with self.assertRaises(KeyboardInterrupt):
                 run.finish(report)
         recovered = workflow.Run(self.repo, "PRD.md")
@@ -578,7 +589,7 @@ class WorkflowTests(unittest.TestCase):
         source.unlink()
         self.implement_and_review(run, "PASS")
         hook = self.repo / ".git/hooks/pre-commit"
-        hook.write_text("#!/bin/sh\nexit 1\n")
+        hook.write_bytes(b"#!/bin/sh\nexit 1\n")
         hook.chmod(0o755)
         with self.assertRaises(workflow.WorkflowError):
             run.commit_ticket()
@@ -594,7 +605,7 @@ class WorkflowTests(unittest.TestCase):
         (self.repo / "source.py").write_text("result=42\n")
         self.implement_and_review(run, "PASS")
         hook = self.repo / ".git/hooks/pre-commit"
-        hook.write_text("#!/bin/sh\nprintf 'result = 42\\n' > source.py\nexit 1\n")
+        hook.write_bytes(b"#!/bin/sh\nprintf 'result = 42\\n' > source.py\nexit 1\n")
         hook.chmod(0o755)
         with self.assertRaises(workflow.WorkflowError):
             run.commit_ticket()
@@ -613,7 +624,7 @@ class WorkflowTests(unittest.TestCase):
         (self.repo / "source.py").write_text("result=42\n")
         self.implement_and_review(run, "PASS")
         hook = self.repo / ".git/hooks/pre-commit"
-        hook.write_text("#!/bin/sh\nprintf 'result = 42\\n' > source.py\ngit add source.py\n")
+        hook.write_bytes(b"#!/bin/sh\nprintf 'result = 42\\n' > source.py\ngit add source.py\n")
         hook.chmod(0o755)
         with self.assertRaises(workflow.WorkflowError):
             run.commit_ticket()

@@ -1,0 +1,29 @@
+name: Helper tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  helpers:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install helper requirements
+        run: python -m pip install -r implement-spec-single-worker/requirements.txt
+      - name: Run the complete helper suite
+        run: python -m unittest discover -s implement-spec-single-worker/tests -v

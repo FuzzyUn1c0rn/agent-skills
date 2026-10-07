@@ -155,7 +155,7 @@ class RepositoryPathTests(unittest.TestCase):
             link.symlink_to(self.repo / self.spec)
             directory.symlink_to(self.repo / "plans café", target_is_directory=True)
         except OSError as error:
-            if os.name == "nt" and error.winerror == 1314:
+            if os.name == "nt" and getattr(error, "winerror", None) == 1314:
                 self.skipTest("Windows symlink creation requires privileges unavailable in this session.")
             raise
         for name in ("linked spec.md", "linked directory/仕様/PRD.md"):
