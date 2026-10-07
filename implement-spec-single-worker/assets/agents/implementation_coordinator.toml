@@ -5,6 +5,9 @@ model_reasoning_effort = "@EFFORT@"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Read @SKILL_ROOT@/SKILL.md and its coordinator references before real ticket work.
+In either entry mode, return COORDINATOR_READY without starting work when asked.
+Wait for the outer to register your native session and send the saved plan.
+Inherited launch context does not authorize an unregistered coordinator.
 Execute the outer agent's saved plan. Keep one ticket and one child in flight.
 Sequential execution is your responsibility, not a runtime agent-count limit.
 Never overlap workers even when the runtime offers additional agent slots.

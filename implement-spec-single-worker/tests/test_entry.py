@@ -94,6 +94,10 @@ class EntryTests(unittest.TestCase):
     def command_result(self, action, report=None):
         command = self.command + [action, "PRD.md", "--repo", str(self.repo), "--session", "current"]
         if report is not None:
+            report = dict(report)
+            if action in {"stop", "recover"}:
+                ownership = json.loads((workflow.git_home(self.repo) / "entry.json").read_text(encoding="utf-8"))
+                report.setdefault("launch_id", ownership["launch_id"])
             path = self.root / "report.json"
             path.write_text(json.dumps(report))
             command += ["--report", str(path)]

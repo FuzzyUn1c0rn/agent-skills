@@ -123,11 +123,15 @@ alone does not establish a settings reload.
 
 ## State and real-work safeguards
 
-Both modes share the checkout lock. Current-session entry holds it with a
-persistent helper and requires inactive-worker evidence to recover stale
-ownership after a crash. Only its outer and registered real coordinator may
-change run state. Registration reads that coordinator's existing native session
-metadata; it does not create a test agent.
+Both modes share the checkout lock and launch-specific ownership. Current-session
+entry holds it with a persistent helper; the dedicated launcher retains it while
+waiting for Codex. Dedicated admission binds the native outer before mutations.
+Both modes require inactive-worker evidence to recover stale ownership after a
+crash. Only the admitted outer and registered real coordinator may change run
+state. Registration reads that coordinator's existing native session
+metadata; it does not create a test agent. Dedicated release needs matching
+worker-shutdown evidence plus normal Codex exit; release immediately stops state
+mutations. Read [entry.md](entry.md) for admission, release and recovery.
 
 The guard retains dependency checks, retry budgets, saved handovers, independent
 ticket verification, snapshot checks and commit recovery. None requires
