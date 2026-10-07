@@ -5,6 +5,13 @@ Resolve an absolute PRD path to its repository-relative path for guard commands.
 The explicit `session=current|new` argument overrides `settings.toml`'s
 `default_session`. Branch and resume choices apply to either mode.
 
+Before starting either mode, set the selected interpreter, skill path and external
+report directory using [runtime.md](runtime.md#helper-shell-paths-and-temporary-reports).
+Replace `entry.py` or `workflow.py` in inline commands below with that interpreter
+and the corresponding quoted script path. Replace quoted `"SPEC"` and `"REPORT"`
+placeholders with actual paths;
+`<report-directory>` is the saved absolute directory from that recipe.
+
 ## Current session
 
 The invoking session stays the outer agent, using the user's selected model and
@@ -27,15 +34,19 @@ unfinished changes.
    Do not start new workers while old workers might still be editing.
 2. Start a persistent shell execution, retaining its tool session ID:
 
+   ```powershell
+   & $Python "$Skill/scripts/entry.py" start "$Spec" --session current
+   ```
+
    ```sh
-   python3 <skill-directory>/scripts/entry.py start path/to/PRD.md --session current
+   "$PYTHON" "$SKILL/scripts/entry.py" start "$SPEC" --session current
    ```
 
    Add `--branch name` or `--resume` as requested. The process prints
    `preflight` with a unique `launch_id` and remains running to hold the checkout lock. It does not
    launch Codex, switch branches or change the chosen model. Do not kill it,
    impose a short timeout or close its execution session during ticket work.
-3. Run `entry.py admit SPEC`. It checks local configuration and checkout
+3. Run `entry.py admit "SPEC"`. It checks local configuration and checkout
    ownership, selects the branch and records this session as the owner.
    A resume requires the inactive-worker handover evidence below.
    It does not start agents, inspect test transcripts, require a compatibility
@@ -43,14 +54,14 @@ unfinished changes.
 4. Perform preflight and continue the outer workflow in `SKILL.md`. Use
    `workflow.py` for state, ticket and commit operations. Keep the lock holder
    alive. Do not alter profiles or delegation features during a run. After compaction,
-   `entry.py status SPEC` identifies this session's existing lock and admission;
+   `entry.py status "SPEC"` identifies this session's existing lock and admission;
    do not start a duplicate holder or create diagnostic agents.
    Register the fresh ticket coordinator with
-   `entry.py coordinator SPEC --agent ID` after its ready response and before
+   `entry.py coordinator "SPEC" --agent ID` after its ready response and before
    sending it the plan. Only this outer and that registered native child may
    change run state. Old owners and other sessions are rejected.
    Before each whole-spec audit, close the coordinator and all its children, then
-   call `entry.py release-coordinator SPEC --report /tmp/coordinator-closed.json`.
+   call `entry.py release-coordinator "SPEC" --report "<report-directory>/coordinator-closed.json"`.
    Include the recorded `coordinator` ID, `previous_workers_inactive: true` and
    concrete closure `evidence`. This retires its registration while retaining the
    checkout lock. After audit repair planning, register a fresh coordinator with
@@ -58,13 +69,13 @@ unfinished changes.
 5. On completion, blocker or preflight failure, close every workflow agent.
    Save a JSON report outside the checkout containing
    the entry's matching `launch_id`, `previous_workers_inactive: true` and concrete `evidence`. Call
-   `entry.py stop SPEC --report /tmp/release.json`, then poll the retained shell
+   `entry.py stop "SPEC" --report "<report-directory>/release.json"`, then poll the retained shell
    execution until it exits successfully. Release the lock before yielding to
    the user; preserve the run record and unfinished files.
 
 If the helper crashes, its OS lock disappears but its ownership record remains.
 Neither entry mode may overwrite that record. Confirm that old workers have
-stopped, then run `entry.py recover SPEC --report /tmp/recovery.json`. The report
+stopped, then run `entry.py recover "SPEC" --report "<report-directory>/recovery.json"`. The report
 must contain the saved `launch_id`, `previous_workers_inactive: true`,
 `previous_outer_session` matching the saved entry and evidence of shutdown.
 Use `previous_outer_session: null` if no dedicated outer was admitted.
@@ -78,7 +89,7 @@ Do not use `resume` merely because a PRD contains already-closed tickets;
 without a framework run record, initialize a fresh run that includes and skips
 those completed dependencies.
 
-For a resume, `admit --report /tmp/handover.json` requires:
+For a resume, `entry.py admit "SPEC" --report "<report-directory>/handover.json"` requires:
 
 ```json
 {
@@ -102,11 +113,15 @@ records an explicit user instruction with `continue-audit` following
 
 Run the existing launcher with a terminal-capable shell execution:
 
-```sh
-python3 <skill-directory>/scripts/entry.py start path/to/PRD.md --session new
+```powershell
+& $Python "$Skill/scripts/entry.py" start "$Spec" --session new
 ```
 
-`workflow.py launch SPEC` remains a supported explicit alias for this mode.
+```sh
+"$PYTHON" "$SKILL/scripts/entry.py" start "$SPEC" --session new
+```
+
+`workflow.py launch "SPEC"` remains a supported explicit alias for this mode.
 It uses the configured launcher model and effort, locally checked preset and shared
 checkout lock. `--resume` resumes the recorded outer rather than adopting the
 run into the caller. If the current tool environment cannot host that terminal,
@@ -117,7 +132,7 @@ the OS lock itself while waiting. It passes `IMPLEMENT_SPEC_LAUNCH_ID` and the
 retained executable path to the child. It does not inherit lock descriptors.
 
 Inside the launched outer, the launch ID identifies context. Run
-`entry.py admit SPEC` before workflow mutations. Admission validates the matching
+`entry.py admit "SPEC"` before workflow mutations. Admission validates the matching
 launch, native outer-session metadata, checkout, branch, runtime and settings,
 then binds the actual outer identity. A fresh launch starts with a null outer and
 authorizes no mutations. A dedicated resume retains the saved outer identity and
@@ -139,7 +154,7 @@ OS temporary directory outside the checkout:
 }
 ```
 
-Call `entry.py stop SPEC --report REPORT` while Codex is still running. It records
+Call `entry.py stop "SPEC" --report "REPORT"` while Codex is still running. It records
 release immediately and rejects subsequent workflow mutations; it does not wait
 for child exit. Then end the dedicated Codex process. The launcher clears
 ownership only after normal Codex exit and matching shutdown evidence, while
