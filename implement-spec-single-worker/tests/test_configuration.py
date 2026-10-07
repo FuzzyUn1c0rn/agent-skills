@@ -123,7 +123,8 @@ class ConfigurationTests(unittest.TestCase):
         project = Path(directory) / "repo"
         project.mkdir()
         workflow.git(project, "init", "-b", "main")
-        home = Path(directory) / "codex"
+        # Match the installer's resolved home before rendering legacy profile paths.
+        home = (Path(directory) / "codex").resolve()
         config = project / ".codex/config.toml"
         config.parent.mkdir()
         config.write_text(
@@ -139,17 +140,23 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_removes_only_confirmed_workflow_config_with_exact_backup(self):
         for cap in (False, True):
-            with self.subTest(cap=cap), tempfile.TemporaryDirectory() as directory:
-                project, home, config = self.legacy_project(directory, cap)
-                original = config.read_bytes()
-                install.remove_project_setup(project, home, confirmed_workflow_only=True)
-                self.assertFalse(config.exists())
-                backups = list((home / "backups").glob("implement-spec-project-removed-*.toml"))
-                self.assertEqual(1, len(backups))
-                self.assertEqual(original, backups[0].read_bytes())
-                install.remove_project_setup(project, home, confirmed_workflow_only=True)
-                self.assertEqual(backups, list((home / "backups").glob("*.toml")))
-                self.assertFalse((home / "config.toml").exists())
+            for aliased in (False, True):
+                with self.subTest(cap=cap, aliased=aliased), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    if aliased:
+                        anchor = root / "anchor"
+                        anchor.mkdir()
+                        root = anchor / ".."
+                    project, home, config = self.legacy_project(root, cap)
+                    original = config.read_bytes()
+                    install.remove_project_setup(project, home, confirmed_workflow_only=True)
+                    self.assertFalse(config.exists())
+                    backups = list((home / "backups").glob("implement-spec-project-removed-*.toml"))
+                    self.assertEqual(1, len(backups))
+                    self.assertEqual(original, backups[0].read_bytes())
+                    install.remove_project_setup(project, home, confirmed_workflow_only=True)
+                    self.assertEqual(backups, list((home / "backups").glob("*.toml")))
+                    self.assertFalse((home / "config.toml").exists())
 
     def test_cleanup_preserves_mixed_user_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
