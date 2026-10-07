@@ -1,4 +1,5 @@
 import tempfile
+import errno
 import unittest
 import json
 from pathlib import Path
@@ -13,9 +14,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import configuration
 import install
 import workflow
+from test_support import isolate_git
 
 
 class ConfigurationTests(unittest.TestCase):
+    def setUp(self):
+        isolate_git(self)
+
     def test_role_expectations_use_one_settings_file(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.toml"
@@ -163,7 +168,12 @@ class ConfigurationTests(unittest.TestCase):
             original = config.read_bytes()
             other = Path(directory) / "other.toml"
             config.rename(other)
-            config.symlink_to(other)
+            try:
+                config.symlink_to(other)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314 or error.errno in {errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    self.skipTest(f"Symlink creation unavailable: {error}")
+                raise
             with self.assertRaisesRegex(RuntimeError, "symlink"):
                 install.remove_project_setup(project, home)
             self.assertEqual(original, other.read_bytes())
