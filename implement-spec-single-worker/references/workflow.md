@@ -183,7 +183,7 @@ consumes the next attempt; interruption never grants extra attempts.
 ## Final audit
 
 After all required ticket commits exist, the coordinator reports the results
-and closes its active agent slot. In current-session mode the outer releases
+and closes its active agent slot. In either entry mode the outer releases
 its registration as described in [entry.md](entry.md), then starts `spec_auditor`.
 
 The auditor reviews the whole change from the recorded baseline against the

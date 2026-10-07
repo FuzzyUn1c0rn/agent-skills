@@ -7,6 +7,7 @@ import json
 import tempfile
 import argparse
 import sys
+import time
 import platform_support
 import tomllib
 import copy
@@ -287,14 +288,14 @@ class Run:
             raise WorkflowError("A run record already exists. Resume it instead of overwriting it.")
         entry_path = git_home(self.repo) / "entry.json"
         if entry_path.exists():
-            owner = json.loads(entry_path.read_text(encoding="utf-8"))["outer_session"]
-            if os.environ.get("CODEX_THREAD_ID") != owner:
+            ownership = json.loads(entry_path.read_text(encoding="utf-8"))
+            require_entry_context(ownership)
+            owner = ownership["outer_session"]
+            if (not owner or os.environ.get("CODEX_THREAD_ID") != owner
+                    or ownership["phase"] != "admitted" or ownership.get("release")):
                 raise WorkflowError("Only the admitted outer session may initialize a run.")
         elif os.environ.get("IMPLEMENT_SPEC_LAUNCH") == "1":
-            session = session_metadata(os.environ.get("CODEX_THREAD_ID"))
-            source = session.get("source")
-            if not source or (isinstance(source, dict) and "subagent" in source):
-                raise WorkflowError("Only the launcher's outer session may initialize a run.")
+            raise WorkflowError("Dedicated admission is required before initializing a run.")
         if git(self.repo, "status", "--porcelain", "--untracked-files=all"):
             raise WorkflowError("Preflight requires a clean checkout; keep the draft plan outside it.")
         if plan.get("spec") != self.spec or not plan.get("checks"):
@@ -1070,7 +1071,7 @@ def session_metadata(identifier):
             event = json.loads(next(stream))
         if event.get("type") == "session_meta" and event["payload"].get("id") == identifier:
             return event["payload"]
-    raise WorkflowError("No native session metadata for the requested coordinator.")
+    raise WorkflowError("No native session metadata for the requested session.")
 
 
 def validate_coordinator(identifier, entry):
@@ -1116,6 +1117,13 @@ def configuration_status():
     }
 
 
+def require_entry_context(entry):
+    if not entry.get("launch_id"):
+        raise WorkflowError("Legacy checkout ownership has no launch ID. Finish or recover it with the previous helper before upgrading.")
+    if entry.get("mode") == "dedicated" and os.environ.get("IMPLEMENT_SPEC_LAUNCH_ID") != entry["launch_id"]:
+        raise WorkflowError("Dedicated launch ID does not match checkout ownership.")
+
+
 def verify_checkout_entry(repo, spec):
     spec = repository_path(spec)
     locked = False
@@ -1129,38 +1137,35 @@ def verify_checkout_entry(repo, spec):
     path = git_home(repo) / "entry.json"
     if path.exists():
         entry = json.loads(path.read_text(encoding="utf-8"))
+        require_entry_context(entry)
         if (entry.get("phase") != "admitted" or entry.get("release")
                 or entry.get("spec") != spec
                 or entry.get("branch") != git(repo, "branch", "--show-current")
                 or entry.get("runtime") != runtime_version(entry["codex_executable"])
                 or entry.get("config_fingerprint") != config_fingerprint()):
-            raise WorkflowError("Current-session admission is missing or stale. Stop before ticket work.")
+            raise WorkflowError("Checkout admission is missing or stale. Stop before ticket work.")
         verify_configuration()
         caller = os.environ.get("CODEX_THREAD_ID")
         if not caller or caller not in {entry["outer_session"], entry.get("coordinator")}:
             raise WorkflowError("Caller is not the admitted owner or its registered coordinator.")
         if caller != entry["outer_session"]:
             validate_coordinator(caller, entry)
-    elif os.environ.get("IMPLEMENT_SPEC_LAUNCH") == "1":
-        verify_configuration()
     else:
         raise WorkflowError("Checkout lock is not attached to this workflow entry.")
 
 
 def launch(repo, spec, branch=None, resume=False):
+    import entry
+
     spec = repository_path(spec)
     verify_configuration()
     executable = platform_support.resolve_codex()
-    version = runtime_version(executable)
-    with exclusive(git_home(repo) / "launch.lock") as descriptor:
+    with exclusive(git_home(repo) / "launch.lock"):
         if (git_home(repo) / "entry.json").exists():
-            raise WorkflowError("An interrupted current-session entry needs entry.py recover before launching.")
+            raise WorkflowError("Interrupted checkout ownership needs entry.py recover before launching.")
         command = [str(executable), "--no-daemon", "--profile", "implement-spec", "--approve-for-me", "-C", str(repo)]
         command.extend(enforced_config_arguments())
-        attached = ("You are already the outer session opened by the dedicated launcher. "
-                    "The parent holds the checkout lock; IMPLEMENT_SPEC_LAUNCH=1. "
-                    f"Codex executable: {executable}; version: {version}. "
-                    "Do not run entry.py start or launch another outer. ")
+        expected_outer = None
         if resume:
             if branch and branch != git(repo, "branch", "--show-current"):
                 existing = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
@@ -1174,17 +1179,38 @@ def launch(repo, spec, branch=None, resume=False):
                 raise WorkflowError("Requested branch conflicts with the saved run.")
             if git(repo, "branch", "--show-current") != run.data["branch"]:
                 raise WorkflowError("Check out the saved run branch before resuming; no changes were moved.")
-            prompt = attached + "Resume the approved $implement-spec-single-worker workflow. Reconcile state and confirm old workers are inactive before continuing. " + json.dumps({"spec": spec})
-            command.extend(["resume", run.data["outer_session"], prompt])
+            selected = run.data["branch"]
+            expected_outer = run.data["outer_session"]
         else:
             selected = choose_branch(repo, spec, branch)
             run = Run(repo, spec)
             if run.data:
                 raise WorkflowError("Run already exists on this branch. Use launch --resume.")
-            prompt = attached + "Use $implement-spec-single-worker to execute the approved AFK workflow. Read the skill before acting. " + json.dumps({"spec": spec, "branch": selected})
+        ownership = entry.create_ownership(repo, spec, "dedicated", executable, branch, resume,
+                                           selected_branch=selected, expected_outer=expected_outer)
+        print(json.dumps(ownership), flush=True)
+        prompt = ("You are already the outer session opened by the dedicated launcher. "
+                  "The parent holds the checkout lock. Read the skill and run entry.py admit "
+                  "before workflow mutations. Do not run entry.py start or launch another outer. "
+                  "Record launch-specific inactive-worker release evidence with entry.py stop before exiting. "
+                  + json.dumps({"spec": spec, "branch": selected, "launch_id": ownership["launch_id"],
+                                "codex_executable": str(executable), "runtime": ownership["runtime"]}))
+        if resume:
+            command.extend(["resume", expected_outer, prompt])
+        else:
             command.append(prompt)
-        return subprocess.call(command, pass_fds=(descriptor,),
-                               env=dict(os.environ, IMPLEMENT_SPEC_LAUNCH="1", IMPLEMENT_SPEC_CODEX=str(executable)))
+        result = subprocess.call(command, env=dict(
+            os.environ, IMPLEMENT_SPEC_LAUNCH="1", IMPLEMENT_SPEC_CODEX=str(executable),
+            IMPLEMENT_SPEC_LAUNCH_ID=ownership["launch_id"],
+        ))
+        if result == 0:
+            while True:
+                try:
+                    entry.complete_release(repo, ownership["launch_id"])
+                    break
+                except LockContended:
+                    time.sleep(0.05)
+        return result
 
 
 def main():
@@ -1213,17 +1239,18 @@ def main():
         if arguments.action == "launch":
             return launch(repo, arguments.spec, arguments.branch, arguments.resume)
         if arguments.action == "prepare":
-            verify_checkout_entry(repo, arguments.spec)
-            verify_configuration()
-            print(choose_branch(repo, arguments.spec, arguments.branch))
+            with exclusive(git_home(repo) / "entry-state.lock"), exclusive(git_home(repo) / "state.lock"):
+                verify_checkout_entry(repo, arguments.spec)
+                verify_configuration()
+                print(choose_branch(repo, arguments.spec, arguments.branch))
             return 0
         run = Run(repo, arguments.spec)
         if arguments.action in {"status", "snapshot"}:
             value = snapshot(repo, [run.record]) if arguments.action == "snapshot" else run.data
             print(json.dumps(value, indent=2))
             return 0
-        verify_checkout_entry(repo, arguments.spec)
-        with exclusive(git_home(repo) / "state.lock"):
+        with exclusive(git_home(repo) / "entry-state.lock"), exclusive(git_home(repo) / "state.lock"):
+            verify_checkout_entry(repo, arguments.spec)
             run = Run(repo, arguments.spec)
             report = json.loads(Path(arguments.report).read_text(encoding="utf-8")) if arguments.report else None
             if arguments.action == "init":

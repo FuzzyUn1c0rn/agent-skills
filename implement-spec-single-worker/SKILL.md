@@ -66,7 +66,7 @@ completed commits and blockers here so the user can follow the work.
    the guard. For a resume, reconcile the saved state and old agent lifecycle
    before allowing any new worker. Never discard unfinished changes.
 4. Spawn exactly one native `implementation_coordinator` by `agent_type`, with
-   no model or effort override or full-history fork. In current-session mode
+   no model or effort override or full-history fork. In both entry modes,
    first ask it to return `COORDINATOR_READY` without starting work. Wait for that response, register
    its ID using `entry.py coordinator SPEC --agent ID`, then send the plan with
    `send_input`. Supply the PRD and saved run record paths.
@@ -78,7 +78,7 @@ completed commits and blockers here so the user can follow the work.
    through the guard, then return it to the open coordinator. Missing decisions
    and further unresolved disagreement return to the user.
 6. After all required ticket commits exist, close the coordinator and release its
-   registration in current-session mode. Spawn one
+   registration through `entry.py release-coordinator` in either entry mode. Spawn one
    native `spec_auditor` with the complete PRD, ticket set, baseline, commit list,
    repository rules, prior audits and verification evidence.
 7. Close the auditor and save its report with `finish`. A complete PASS finishes

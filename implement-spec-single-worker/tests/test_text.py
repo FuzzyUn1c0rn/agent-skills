@@ -231,7 +231,7 @@ class EntryUtf8Tests(unittest.TestCase):
         (self.repo / "ticket.md").write_bytes("# 仕様 東京 🚀\nStatus: ready-for-agent\n".encode("utf-8"))
         workflow.git(self.repo, "add", "ticket.md")
         workflow.git(self.repo, "commit", "-m", "Unicode ticket fixture")
-        process, _ = self.start()
+        process, ownership = self.start()
         admitted = subprocess.run(self.command + ["admit", "PRD.md", "--repo", str(self.repo)],
                                   env=self.env, capture_output=True, text=True, encoding="utf-8", timeout=10)
         self.assertEqual(0, admitted.returncode, admitted.stderr)
@@ -249,7 +249,8 @@ class EntryUtf8Tests(unittest.TestCase):
         self.assertEqual("東京 🚀 approved requirements and seams.",
                          workflow.Run(self.repo, "PRD.md").data["plan"]["approval_evidence"])
         report = self.root / "release.json"
-        report.write_bytes(json.dumps({"previous_workers_inactive": True, "evidence": "東京 🚀 agents closed."},
+        report.write_bytes(json.dumps({"launch_id": ownership["launch_id"], "previous_workers_inactive": True,
+                                      "evidence": "東京 🚀 agents closed."},
                                      ensure_ascii=False).encode("utf-8"))
         released = subprocess.run(
             self.command + ["stop", "PRD.md", "--repo", str(self.repo), "--report", str(report)],

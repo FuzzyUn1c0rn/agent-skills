@@ -187,7 +187,7 @@ class EntryPathTests(unittest.TestCase):
     start = entry_fixtures.EntryTests.start
 
     def test_current_entry_accepts_equivalent_spec_names(self):
-        process, _ = self.start()
+        process, ownership = self.start()
         admitted = subprocess.run(
             self.command + ["admit", "./PRD.md", "--repo", str(self.repo)],
             env=self.env, capture_output=True, text=True, timeout=10,
@@ -195,7 +195,8 @@ class EntryPathTests(unittest.TestCase):
         self.assertEqual(0, admitted.returncode, admitted.stderr)
         self.assertEqual("PRD.md", json.loads(admitted.stdout)["spec"])
         report = self.root / "release.json"
-        report.write_text(json.dumps({"previous_workers_inactive": True, "evidence": "No agents started."}))
+        report.write_text(json.dumps({"launch_id": ownership["launch_id"], "previous_workers_inactive": True,
+                                      "evidence": "No agents started."}))
         stopped = subprocess.run(
             self.command + ["stop", str(Path(".") / "PRD.md"), "--repo", str(self.repo), "--report", str(report)],
             env=self.env, capture_output=True, text=True, timeout=10,

@@ -7,7 +7,7 @@ The coordinator executes that plan through the existing ticket cycle.
 
 ## Assess and plan
 
-1. Close the auditor and all other workflow agents. In current-session mode,
+1. Close the auditor and all other workflow agents. In either entry mode,
    release any closed coordinator registration using [entry.md](entry.md).
    Keep the checkout lock while planning and running repairs.
 2. For a newly returned audit, commit its report using

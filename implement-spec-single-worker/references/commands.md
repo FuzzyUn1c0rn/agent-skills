@@ -5,8 +5,9 @@ root, or supply `--repo`. Spec and ticket paths are repository-relative.
 
 Read [entry.md](entry.md) for both entry modes. The launcher selects the branch
 before opening Codex. Current-session entry holds the same lock and selects the
-branch during local admission. Guard mutations require a live, admitted entry
-or validated launcher. `doctor` checks the launcher's installed runtime/profile
+branch during local admission. Guard mutations require a live, admitted entry in
+either mode, and are serialized with release. Inherited launch context authorizes
+no mutations. `doctor` checks the launcher's installed runtime/profile
 settings and makes no project changes or model calls; it does not start agents.
 
 ## Plan and state
