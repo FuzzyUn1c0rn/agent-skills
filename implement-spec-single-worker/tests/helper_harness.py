@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 
 helper = sys.argv.pop(1)
@@ -14,6 +15,15 @@ original_call = subprocess.call
 
 
 def fixture_run(command, *args, **kwargs):
+    pause = os.environ.get("IMPLEMENT_SPEC_TEST_PAUSE_GIT")
+    if pause and command[0] == "git" and "status" in command:
+        folder = Path(pause)
+        (folder / "entered").touch()
+        deadline = time.monotonic() + 60
+        while not (folder / "resume").exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError("Git fixture pause timed out")
+            time.sleep(0.03)
     if command == [str(Path(sys.executable).resolve()), "--version"]:
         if os.environ.get("IMPLEMENT_SPEC_TEST_VERSION_CAPTURE"):
             Path(os.environ["IMPLEMENT_SPEC_TEST_VERSION_CAPTURE"]).write_text(json.dumps(command), encoding="utf-8")
@@ -22,6 +32,11 @@ def fixture_run(command, *args, **kwargs):
 
 
 def fixture_call(command, *args, **kwargs):
+    child = os.environ.get("IMPLEMENT_SPEC_TEST_CHILD")
+    if child and command[0] == str(Path(sys.executable).resolve()):
+        if os.environ.get("IMPLEMENT_SPEC_TEST_SPAWN_FAILURE"):
+            raise OSError("fixture spawn failure")
+        return original_call([sys.executable, child, *command[1:]], *args, **kwargs)
     capture = os.environ.get("IMPLEMENT_SPEC_TEST_LAUNCH_CAPTURE")
     if capture and command[0] == str(Path(sys.executable).resolve()):
         child = (
