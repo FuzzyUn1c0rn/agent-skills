@@ -1,10 +1,11 @@
 import json
 import os
 from pathlib import Path
-import selectors
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import datetime
 from unittest.mock import patch
@@ -14,9 +15,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import configuration
 import install
 import workflow
+import entry
+import platform_support
 
 
 class EntryTests(unittest.TestCase):
+    def test_lock_backend_failure_cannot_authorize_admission_or_state_mutation(self):
+        import portalocker
+
+        self.start()
+        ownership = entry.entry_path(self.repo).read_bytes()
+        with patch.dict(os.environ, self.env), patch(
+            "portalocker.portalocker.lock", side_effect=portalocker.LockException("backend unavailable"),
+        ):
+            with self.assertRaises(platform_support.LockError):
+                entry.owned_entry(self.repo, "PRD.md")
+            with self.assertRaises(platform_support.LockError):
+                workflow.verify_checkout_entry(self.repo, "PRD.md")
+        self.assertEqual(ownership, entry.entry_path(self.repo).read_bytes())
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -44,8 +61,10 @@ class EntryTests(unittest.TestCase):
                          'echo "UNEXPECTED_CODEX_LAUNCH" >&2\nexit 99\nfi\n')
         codex.chmod(0o755)
         self.env = dict(os.environ, CODEX_HOME=str(self.home),
-                        CODEX_THREAD_ID="selected-outer", PATH=str(binary) + ":" + os.environ["PATH"])
-        self.command = [sys.executable, str(self.skill / "scripts/entry.py")]
+                        CODEX_THREAD_ID="selected-outer", PATH=str(binary) + os.pathsep + os.environ["PATH"])
+        self.harness = str(Path(__file__).with_name("helper_harness.py"))
+        self.command = [sys.executable, self.harness, str(self.skill / "scripts/entry.py")]
+        self.workflow_command = [sys.executable, self.harness, str(self.skill / "scripts/workflow.py")]
 
     def start(self, *options):
         process = subprocess.Popen(
@@ -57,10 +76,9 @@ class EntryTests(unittest.TestCase):
                 process.terminate()
             process.communicate(timeout=5)
         self.addCleanup(cleanup)
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            self.assertTrue(selector.select(5), "Current-session entry did not report readiness")
-        line = process.stdout.readline()
+        ready = queue.Queue()
+        threading.Thread(target=lambda: ready.put(process.stdout.readline()), daemon=True).start()
+        line = ready.get(timeout=5)
         if not line:
             self.fail(process.stderr.read())
         return process, json.loads(line)
@@ -185,7 +203,7 @@ class EntryTests(unittest.TestCase):
     def test_guard_rejects_mutation_before_current_session_admission(self):
         self.start()
         result = subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "init", "PRD.md",
+            self.workflow_command + ["init", "PRD.md",
              "--repo", str(self.repo), "--plan", "/missing-plan"],
             env=self.env, capture_output=True, text=True,
         )
@@ -204,7 +222,7 @@ class EntryTests(unittest.TestCase):
         binary.chmod(0o755)
         (self.skill / "references/runtime-evidence.json").unlink(missing_ok=True)
         result = subprocess.run(
-            self.command + ["start", "PRD.md", "--repo", str(self.repo), "--session", "new"],
+            [sys.executable, str(self.skill / "scripts/entry.py"), "start", "PRD.md", "--repo", str(self.repo), "--session", "new"],
             env=self.env, capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(0, result.returncode, result.stderr)
@@ -224,7 +242,7 @@ class EntryTests(unittest.TestCase):
     def test_doctor_checks_local_configuration_without_starting_codex_agents(self):
         (self.skill / "references/runtime-evidence.json").unlink(missing_ok=True)
         result = subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "doctor"],
+            self.workflow_command + ["doctor"],
             env=self.env, capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(0, result.returncode, result.stderr)
@@ -235,7 +253,7 @@ class EntryTests(unittest.TestCase):
 
     def guard_result(self, environment=None):
         return subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "init", "PRD.md",
+            self.workflow_command + ["init", "PRD.md",
              "--repo", str(self.repo), "--plan", "/missing-plan"],
             env=environment or self.env, capture_output=True, text=True, timeout=5,
         )
@@ -302,7 +320,7 @@ class EntryTests(unittest.TestCase):
         plan = self.root / "coordinator-init.json"
         plan.write_text(json.dumps({"spec": "PRD.md"}))
         rejected_init = subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "init", "PRD.md",
+            self.workflow_command + ["init", "PRD.md",
              "--repo", str(self.repo), "--plan", str(plan)],
             env=dict(self.env, CODEX_THREAD_ID="actual-coordinator"),
             capture_output=True, text=True, timeout=5,
@@ -387,7 +405,7 @@ class EntryTests(unittest.TestCase):
                 report_path = self.root / "audit-command.json"
                 report_path.write_text(json.dumps(report))
                 command = [
-                    sys.executable, str(self.skill / "scripts/workflow.py"), "repair-audit", "PRD.md",
+                    *self.workflow_command, "repair-audit", "PRD.md",
                     "--repo", str(self.repo), "--report", str(report_path),
                 ]
                 result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=5)
@@ -402,7 +420,7 @@ class EntryTests(unittest.TestCase):
                 "previous_workers_inactive": True, "evidence": "User reviewed the stopped run.",
                 "user_authorization": "Continue working on the audit defects.",
             }))
-            command[2] = "continue-audit"
+            command[len(self.workflow_command)] = "continue-audit"
             result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=5)
             self.assertEqual(0, result.returncode, result.stderr)
             restored = workflow.Run(self.repo, "PRD.md")
