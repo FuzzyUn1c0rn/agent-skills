@@ -26,7 +26,7 @@ class RepositoryPathTests(unittest.TestCase):
         workflow.git(self.repo, "commit", "-m", "Nested tracker fixtures")
         run = workflow.Run(self.repo, spec or self.spec)
         run.create({
-            "spec": self.spec, "checks": [["suite"]], "approval_evidence": "Confirmed PRD",
+            "spec": self.spec, "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "approval_evidence": "Confirmed PRD",
             "requirements": ["US1"],
             "tickets": [{"path": "./" + name, "criteria": ["AC1"], "blocked_by": [],
                          "seams": ["public"], "execution": "AFK", "kind": "behavior"}
@@ -147,7 +147,7 @@ class RepositoryPathTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(workflow.WorkflowError):
                 workflow.Run(self.repo, name)
 
-    def test_symlink_files_and_parent_directories_cannot_identify_a_run(self):
+    def test_selected_local_tracker_rejects_symlink_files_and_parent_directories(self):
         run = self.new_run()
         link = self.repo / "linked spec.md"
         directory = self.repo / "linked directory"
@@ -158,9 +158,12 @@ class RepositoryPathTests(unittest.TestCase):
             if os.name == "nt" and getattr(error, "winerror", None) == 1314:
                 self.skipTest("Windows symlink creation requires privileges unavailable in this session.")
             raise
+        workflow.git(self.repo, "add", "--all")
+        workflow.git(self.repo, "commit", "-m", "Selected local tracker symlink fixtures")
         for name in ("linked spec.md", "linked directory/仕様/PRD.md"):
-            with self.subTest(name=name), self.assertRaises(workflow.WorkflowError):
-                workflow.Run(self.repo, name)
+            plan = dict(run.data["plan"], spec=name, tracker={"kind": "local-markdown"})
+            with self.subTest(name=name), self.assertRaisesRegex(workflow.WorkflowError, "regular file"):
+                workflow.Run(self.repo, name).create(plan)
         self.assertEqual("ready", run.data["phase"])
 
     @unittest.skipIf(os.name == "nt", "Windows filenames cannot contain tabs, newlines or quotes.")

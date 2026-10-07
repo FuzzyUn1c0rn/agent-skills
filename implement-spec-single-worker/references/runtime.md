@@ -94,8 +94,11 @@ path still invalidates admission if the version changes.
 From the repository root, use the same selected Python interpreter for every
 helper. Resolve it to an absolute executable path; replace `python` or `python3`
 below with that interpreter if needed. Set the skill path to its actual installed
-destination and the specification path relative to the checkout. Quote every
-executable, script, specification, ticket and report path.
+destination and set the specification argument to its canonical tracker reference.
+Quote every executable, script, tracker reference and report path.
+Read [sources.md](sources.md) for artifact discovery and tracker operations.
+`$Spec` / `SPEC` below is the actual specification or Wayfinder-map reference;
+helpers accept it directly. Agents use repository-configured tracker tools.
 
 Create an OS-derived report directory outside the checkout before saving plans
 or handoff JSON. These recipes reject a temporary root inside the checkout before
@@ -106,7 +109,7 @@ PowerShell:
 ```powershell
 $Python = (python -c "import sys; print(sys.executable)")
 $Skill = "$env:USERPROFILE/.agents/skills/implement-spec-single-worker"
-$Spec = 'path with spaces/PRD.md'
+$Spec = '<spec-reference>'
 $Reports = & $Python -c "from pathlib import Path; import tempfile; root=Path.cwd().resolve(); temp=Path(tempfile.gettempdir()).resolve(); assert not temp.is_relative_to(root), 'Temporary reports must be outside the checkout'; print(tempfile.mkdtemp(prefix='implement-spec-', dir=temp))"
 ```
 
@@ -115,7 +118,7 @@ POSIX shell (WSL):
 ```sh
 PYTHON="$(python3 -c 'import sys; print(sys.executable)')"
 SKILL="$HOME/.agents/skills/implement-spec-single-worker"
-SPEC='path with spaces/PRD.md'
+SPEC='<spec-reference>'
 REPORTS="$("$PYTHON" -c 'from pathlib import Path; import tempfile; root=Path.cwd().resolve(); temp=Path(tempfile.gettempdir()).resolve(); assert not temp.is_relative_to(root), "Temporary reports must be outside the checkout"; print(tempfile.mkdtemp(prefix="implement-spec-", dir=temp))')"
 ```
 

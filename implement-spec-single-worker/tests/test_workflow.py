@@ -75,7 +75,7 @@ class WorkflowTests(unittest.TestCase):
     def new_run(self):
         run = workflow.Run(self.repo, "PRD.md")
         run.create({
-            "spec": "PRD.md", "checks": [["suite"]], "approval_evidence": "Confirmed PRD",
+            "spec": "PRD.md", "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "approval_evidence": "Confirmed PRD",
             "requirements": ["US1"],
             "tickets": [{"path": "ticket.md", "criteria": ["AC1"], "blocked_by": [],
                          "seams": ["public"], "execution": "AFK", "kind": "behavior"}],
@@ -390,7 +390,7 @@ class WorkflowTests(unittest.TestCase):
         run = workflow.Run(self.repo, "PRD.md")
         with self.assertRaises(workflow.WorkflowError):
             run.create({
-                "spec": "PRD.md", "checks": [["suite"]], "requirements": ["US1"],
+                "spec": "PRD.md", "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "requirements": ["US1"],
                 "approval_evidence": "PRD",
                 "tickets": [{"path": "ticket.md", "execution": "AFK", "criteria": ["AC1"],
                              "seams": ["public"], "blocked_by": ["ticket.md"]}],

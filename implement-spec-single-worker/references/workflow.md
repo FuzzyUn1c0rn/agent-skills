@@ -36,19 +36,23 @@ The dedicated launcher supplies necessary overrides only to its own process.
    unfinished changes, attempts and active agents. A dirty checkout is allowed
    only when it matches the interrupted run. Preserve mismatched work and
    return the discrepancy to the user.
-4. Read the selected branch's applicable AGENTS.md files, tracker instructions,
-   architecture decisions, testing guidance, PRD and all required tickets.
+4. Read the selected branch's applicable AGENTS.md files,
+   `docs/agents/issue-tracker.md`, architecture decisions, testing guidance,
+   specification/map and all required tickets from that tracker. Resolve canonical
+   references and capture approved bodies, discussion and dependencies using
+   [sources.md](sources.md).
 5. Resolve the full ticket set and dependency graph. Reject missing
    dependencies, cycles, non-AFK required work, unclear acceptance criteria,
    missing access and unapproved behavior, interface or testing-boundary
    decisions before implementation.
-6. Resolve finished-ticket and finished-PRD labels from explicit repository
-   rules. Where the tracker is silent, use `closed` for tickets and `done` for
-   the PRD. Escalate conflicting explicit rules.
+6. Resolve actual tracker completion operations and normalize ticket eligibility
+   for the execution plan using [sources.md](sources.md). Escalate conflicting
+   explicit repository rules.
 7. Record the plan, baseline commit, branch, ordered tickets, dependencies,
    acceptance criteria, approved testing boundaries, verification commands,
-   completion labels and operation authorization. Resolve ordering ties by
-   the PRD's explicit order, then ticket path.
+   completion operations, source revisions and operation authorization. Resolve ordering ties by
+   the specification/map's explicit order, then canonical ticket reference. Store
+   the resulting reference order in the plan.
 8. Establish the offline test baseline. A required check that cannot complete
    or already fails blocks the run; do not silently exclude it.
 9. Proceed to real ticket work using the named native profiles. Startup does
@@ -72,7 +76,7 @@ Additional runtime agent slots never authorize overlapping ticket work.
    Record its starting HEAD and increment its persistent attempt count before
    starting implementation.
 2. Start a fresh implementer for every attempt, including repairs. Supply the
-   ticket, relevant PRD context, approved testing boundaries and the TDD skill
+   ticket, relevant specification context, approved testing boundaries and the TDD skill
    path. For a repair, also supply the current diff and untracked files, prior
    TDD evidence and stable verifier findings from the saved attempt history.
    Do not resume a closed implementer or assume its earlier context survives.
@@ -84,12 +88,12 @@ Additional runtime agent slots never authorize overlapping ticket work.
 4. Wait for the implementer to return. Save its session identifier and full
    structured result in the attempt history, then close its active agent slot
    before starting verification.
-5. Start a fresh verifier with the ticket, PRD, repository rules, starting
+5. Start a fresh verifier with the ticket, specification, repository rules, starting
    commit, current changed and untracked files, test evidence and prior findings.
    The verifier inspects the actual uncommitted changes, checks acceptance,
    correctness, regressions, test quality and documented architecture rules,
    and runs the full supported offline suite. It leaves project source and
-   tracker files unchanged; ordinary disposable test output is allowed.
+   tracker artifacts unchanged; ordinary disposable test output is allowed.
 6. Act on the structured verdict:
    - `PASS`: all required criteria and checks completed, no blocking finding.
    - `REWORK`: evidence-backed problems that can be corrected within the agreed
@@ -103,15 +107,18 @@ Additional runtime agent slots never authorize overlapping ticket work.
    earlier. A blocker or exhausted attempts stops the whole run, including
    otherwise independent tickets.
 8. On `PASS`, confirm the reviewed changes still match the checkout, inspect
-   the exact diff and file list, update the ticket's status and evidence record,
-   and commit that cohesive set locally. Stage explicit paths. The code,
-   ticket closure and verification summary belong in the same commit.
+   the exact diff and file list, and commit the verified work and execution
+   evidence locally. Stage explicit code/evidence paths. Then update the actual
+   ticket through the configured tracker, following [sources.md](sources.md).
+   For remote trackers, record read-back confirmation with `published`; selected
+   local tracker updates are part of the ticket transaction. Pending publication blocks
+   the next ticket and final audit.
    A changed implementation invalidates the pass, including changes introduced
    by formatters or commit hooks. A failed commit does not complete the ticket.
    If a hook commits unreviewed edits, preserve that commit and use the guard's
    invalidation recovery. Keep the ticket unfinished until a fresh verifier
    checks the entire diff from its original review base; never rewrite history.
-9. Record the resulting commit and choose the next ticket. Leave the PRD
+9. Record the resulting commit and choose the next ticket. Leave the specification
    unfinished until the final audit passes.
 
 Keep advisory suggestions separate. Concrete defects, unmet criteria and
@@ -132,7 +139,7 @@ another repair when it or the implementer contests a finding, even on attempt on
 Close the verifier and all other leaves first. The coordinator returns the
 request and remains open but idle. The outer agent adjudicates
 directly, without another sub-agent or source edits. Give it the ticket, approved
-PRD, repository rules, current diff, actual check results, original reports,
+specification, repository rules, current diff, actual check results, original reports,
 attempt history and dispute evidence.
 
 The outer agent classifies every current blocker as `confirmed_blocker`,
@@ -158,10 +165,13 @@ a new recorded allowance through explicit human continuation.
 
 ## Recovery
 
-Keep the human-readable execution record beside the PRD. Record the run's
+Keep the execution record in the guard's reported evidence location. Record the run's
 baseline, planned tickets, current ticket, attempts, worker identifiers,
 verification evidence and completed commits. Runtime bookkeeping and verbose
 logs may live under the repository's Git directory.
+Reconcile canonical artifact references, source revisions and pending tracker
+operations using [sources.md](sources.md) before resuming implementation.
+Execution bookkeeping does not change where the repository tracks its artifacts.
 
 After interruption, inspect the record, branch, HEAD, index, changed files and
 agent lifecycle state. Confirm old workers are inactive before resuming. Do not
@@ -187,17 +197,21 @@ and closes its active agent slot. In either entry mode the outer releases
 its registration as described in [entry.md](entry.md), then starts `spec_auditor`.
 
 The auditor reviews the whole change from the recorded baseline against the
-PRD, all completed tickets and relevant repository rules. It verifies
+specification, all completed tickets and relevant repository rules. It verifies
 cross-ticket behavior, requirements coverage and architecture. It may reuse
 test evidence only when it applies to the exact audited code and environment.
 Run additional checks where evidence is missing.
 
 Return the audited commit, requirements-to-evidence mapping, performed and
 reused checks, blocking findings, advisory findings and unavailable checks.
-The auditor reports findings and does not change implementation or tracker files.
+The auditor reports findings and does not change implementation or tracker artifacts.
 
 The outer commits every audit, including failed audits. Only a complete PASS
-finishes the PRD. Advisory findings do not block completion. Failed audits enter
+allows specification completion. The outer updates the actual specification/map
+and publishes audit evidence through [sources.md](sources.md). Remote trackers
+require the read-back receipt with `published`; selected local tracker updates
+are part of the audit transaction. Advisory findings
+do not block completion. Failed audits enter
 the [bounded audit-repair workflow](audit-repairs.md): the outer assesses findings,
 reopens or creates repair tickets, and delegates the updated plan to a fresh
 coordinator. The next audit reviews the whole specification and prior findings

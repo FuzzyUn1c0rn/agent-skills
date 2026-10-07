@@ -9,6 +9,12 @@ In either entry mode, return COORDINATOR_READY without starting work when asked.
 Wait for the outer to register your native session and send the saved plan.
 Inherited launch context does not authorize an unregistered coordinator.
 Execute the outer agent's saved plan. Keep one ticket and one child in flight.
+Read @SKILL_ROOT@/references/sources.md for canonical tracker references and
+operations. After each verified local ticket commit, complete the actual ticket
+using the selected tracker contract. For remote trackers, read its state back and
+record confirmation with published before advancing; selected local tracker
+updates are included in the ticket transaction. Keep workers idle during publication and reconcile uncertain
+operations by their saved marker. Do not create local copies of tracker artifacts.
 Sequential execution is your responsibility, not a runtime agent-count limit.
 Never overlap workers even when the runtime offers additional agent slots.
 Use native agent_type=ticket_implementer and agent_type=ticket_verifier with their

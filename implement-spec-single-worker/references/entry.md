@@ -1,15 +1,17 @@
 # Entry modes
 
 The outer agent runs these helpers. Do not tell the user to memorize commands.
-Resolve an absolute PRD path to its repository-relative path for guard commands.
+Read [sources.md](sources.md) and resolve the canonical specification reference
+before entry. Pass that same reference to every helper; ticket and specification
+references identify actual artifacts in the configured tracker.
 The explicit `session=current|new` argument overrides `settings.toml`'s
 `default_session`. Branch and resume choices apply to either mode.
 
 Before starting either mode, set the selected interpreter, skill path and external
 report directory using [runtime.md](runtime.md#helper-shell-paths-and-temporary-reports).
 Replace `entry.py` or `workflow.py` in inline commands below with that interpreter
-and the corresponding quoted script path. Replace quoted `"SPEC"` and `"REPORT"`
-placeholders with actual paths;
+and the corresponding quoted script path. Replace quoted `"SPEC"` with the
+canonical specification reference and `"REPORT"` with the actual report path;
 `<report-directory>` is the saved absolute directory from that recipe.
 
 ## Current session
@@ -31,6 +33,8 @@ unfinished changes.
 
 1. Confirm exclusive use of the checkout and finish unrelated checkout work.
    For an existing saved run, confirm every old coordinator and leaf stopped.
+   Reuse its canonical references, approved captures and tracker recovery journal;
+   recover pending source operations before new implementation work.
    Do not start new workers while old workers might still be editing.
 2. Start a persistent shell execution, retaining its tool session ID:
 
@@ -85,7 +89,7 @@ not ticket state, changes or attempt counts. A live holder cannot be recovered.
 ### Resume into this outer session
 
 Use `start --session current --resume` for an interrupted recorded run.
-Do not use `resume` merely because a PRD contains already-closed tickets;
+Do not use `resume` merely because a specification contains already-closed tickets;
 without a framework run record, initialize a fresh run that includes and skips
 those completed dependencies.
 

@@ -7,8 +7,8 @@ The coordinator executes that plan through the existing ticket cycle.
 
 Use the selected interpreter, quoted helper path and external report directory
 from [runtime.md](runtime.md#helper-shell-paths-and-temporary-reports) for the
-workflow arguments below. Replace quoted `"SPEC"` with the repository-relative
-specification path and `<report-directory>` with the saved absolute directory.
+workflow arguments below. Replace quoted `"SPEC"` with the canonical
+specification reference and `<report-directory>` with the saved absolute directory.
 
 ## Assess and plan
 
@@ -19,32 +19,33 @@ specification path and `<report-directory>` with the saved absolute directory.
    `finish "SPEC" --report "<report-directory>/audit.json"`. On resume, reuse the already saved
    audit; an interrupted audit commit uses `reconcile-commit`. Inspect
    `status "SPEC"` for the latest audit, current snapshot, allowance and remaining
-   work. A complete PASS finishes the PRD.
-3. Assess every blocking finding against the approved PRD and repository rules.
+   work. A complete PASS permits specification completion through the tracker.
+3. Assess every blocking finding against the approved specification and repository rules.
    Classify it as `confirmed_blocker`, `advisory`, `unsupported` or `needs_human`,
    with requirement references and concrete evidence. Preserve the original
    report. Missing decisions return to the user. Required unavailable checks
    need evidence that the capability or authorization has been restored.
    Permission to continue repairs alone does not authorize live operations.
-4. For confirmed defects, reopen a completed ticket whose original acceptance
+4. For confirmed defects, use the configured tracker to reopen a completed ticket whose original acceptance
    criteria are unmet. Create a linked AFK repair ticket for cross-ticket defects
    or missing work within the approved specification. Keep the original
    acceptance criteria and requirements. Record dependencies, testing boundaries,
    related tickets and which findings each repair must resolve. Group one
    finding's correction into one repair ticket; multiple findings may share it.
-5. Write the repair plan outside the checkout and call
-   `repair-audit "SPEC" --report "<report-directory>/audit-repairs.json"`. The guard validates the
-   complete dependency graph, reopens or creates the ticket files, and commits
-   the plan and execution record before workers start. The outer supplies new
-   ticket content in the repository's format. Use this command instead of editing
-   tracker status or saved state by hand.
+5. Write the repair plan outside the checkout with the actual canonical tracker
+   references and evidence for creation/reopening/linking, following
+   [sources.md](sources.md#audit-repairs). Call
+   `repair-audit "SPEC" --report "<report-directory>/audit-repairs.json"`.
+   The guard validates the graph and commits the updated execution plan and
+   allowance record before workers start. Recover interrupted tracker operations
+   from their journal; recover interrupted local commits with `reconcile-commit`.
 6. Spawn and register a fresh coordinator as described in `SKILL.md`. Give it
    the updated plan, audit decisions, assigned findings and saved attempt history.
    Each repair uses a fresh implementer, independent verifier and local commit.
    Repair PASS must include evidence for every assigned audit finding as well
    as all original acceptance criteria and required checks.
 7. After repairs, close and release the coordinator and start a fresh auditor.
-   Review the whole PRD from the original baseline, including earlier completed
+   Review the whole specification from the original baseline, including earlier completed
    work, repair commits, prior audits and finding dispositions. A ticket's PASS
    does not establish that the full specification now passes.
 
@@ -52,9 +53,8 @@ If all alleged blockers are advisory or unsupported, submit the classifications
 with an empty `tickets` list. This requests a fresh full audit of unchanged code;
 the outer's decision never grants PASS. It consumes one audit-repair round.
 
-The initial audit is saved as `final-audit.md`. Later audits use
-`final-audit-002.md`, `final-audit-003.md`, and so on. Earlier reports remain
-unchanged. `status "SPEC"` identifies the latest report and committed audit.
+Each audit is saved as a distinct JSON execution-evidence report. Earlier reports
+remain unchanged. `status "SPEC"` identifies the latest report and committed audit.
 
 ## Resume a pre-repair-workflow audit
 
@@ -86,14 +86,15 @@ once. Every confirmed blocker must appear in exactly one ticket's `finding_ids`.
     {
       "id": "AUDIT-F01",
       "classification": "confirmed_blocker",
-      "reference": "path/to/PRD.md#US1 and path/to/ticket.md#AC1",
+      "reference": "specification-reference#US1 and ticket-reference#AC1",
       "evidence": "Concrete reproduction showing the required behavior is missing."
     }
   ],
   "tickets": [
     {
       "action": "reopen",
-      "path": "path/to/ticket.md",
+      "ref": "canonical-ticket-reference",
+      "tracker_evidence": "Read-back confirmation of the configured reopening operation",
       "finding_ids": ["AUDIT-F01"],
       "requirements": ["US1"]
     }
@@ -101,13 +102,16 @@ once. Every confirmed blocker must appear in exactly one ticket's `finding_ids`.
 }
 ```
 
-A `create` ticket additionally supplies `execution: "AFK"`, `criteria`, `seams`,
-`blocked_by`, optional `related_tickets`, and complete Markdown `content` with
-exactly one ready `Status:` line. Use the preflight plan's labels. Nonbehavioral
-work uses `kind: "documentation"` and follows the usual validation contract.
-Behavioral work defaults to `kind: "behavior"` and requires approved `seams`.
-The guard appends the audit link, finding IDs and requirement IDs to either
-ticket type. It preserves the original ticket text when reopening.
+A `create` ticket additionally supplies its actual `ref`, captured `body` and
+`revision`, `tracker_evidence`, `execution: "AFK"`, `criteria`, `seams`,
+`blocked_by` and optional `related_tickets`. Use the configured tracker for the
+artifact's state and relationships. Nonbehavioral work uses
+`kind: "documentation"`; behavioral work requires approved testing boundaries.
+The execution record associates audit links, finding IDs and requirement IDs
+with each repair. Original requirements remain unchanged when reopening.
+
+Only for a selected local Markdown tracker, use the conditional creation/status
+transaction described in [local-markdown.md](local-markdown.md).
 
 When the audit lists unavailable checks, include `check_resolution` explaining
 how they became available and identifying any required authorization. The next

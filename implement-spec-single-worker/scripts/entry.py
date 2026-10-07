@@ -26,7 +26,7 @@ def entry_path(repo):
 
 
 def owned_entry(repo, spec, admission=False):
-    spec = workflow.repository_path(spec)
+    spec = workflow.tracker_reference(spec)
     path = entry_path(repo)
     if not path.exists():
         raise workflow.WorkflowError("No checkout ownership. Run entry.py start first.")
@@ -34,7 +34,7 @@ def owned_entry(repo, spec, admission=False):
     workflow.require_entry_context(entry)
     unbound = admission and entry["mode"] == "dedicated" and entry["outer_session"] is None
     if (not unbound and entry["outer_session"] != session_id()) or entry["spec"] != spec:
-        raise workflow.WorkflowError("This checkout entry belongs to a different outer session or PRD.")
+        raise workflow.WorkflowError("This checkout entry belongs to a different outer session or specification.")
     if entry.get("release"):
         raise workflow.WorkflowError("Checkout release is already pending.")
     try:
@@ -83,11 +83,10 @@ def complete_release(repo, launch_id):
 
 
 def hold(repo, spec, branch=None, resume=False):
-    spec = workflow.repository_path(spec)
+    spec = workflow.tracker_reference(spec)
     workflow.verify_configuration()
     executable = platform_support.resolve_codex()
     owner = session_id()
-    workflow.relative_file(repo, spec)
     with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
         entry = create_ownership(repo, spec, "current", executable, branch, resume, outer=owner)
         print(json.dumps(entry), flush=True)
@@ -148,7 +147,6 @@ def admit(repo, spec, report=None):
             selected = workflow.choose_branch(repo, spec, entry["branch"] if entry["mode"] == "dedicated" else entry["requested_branch"])
             if workflow.Run(repo, spec).data:
                 raise workflow.WorkflowError("Run already exists on this branch. Stop, then start with --resume.")
-        workflow.relative_file(repo, spec).read_text(encoding="utf-8")
         entry.update(phase="admitted", admitted_at=time.time(), branch=selected, outer_session=owner)
         workflow.write_json(entry_path(repo), entry)
         return entry
@@ -196,7 +194,7 @@ def stop(repo, spec, report):
 
 
 def recover(repo, spec, report):
-    spec = workflow.repository_path(spec)
+    spec = workflow.tracker_reference(spec)
     require_inactive(report)
     with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
         with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
@@ -205,7 +203,7 @@ def recover(repo, spec, report):
                 raise workflow.WorkflowError("Legacy ownership must be recovered with the previous helper before upgrading.")
             if (entry["spec"] != spec or report.get("launch_id") != entry["launch_id"]
                     or report.get("previous_outer_session") != entry["outer_session"]):
-                raise workflow.WorkflowError("Recovery must identify the interrupted PRD, launch ID and outer session (if bound).")
+                raise workflow.WorkflowError("Recovery must identify the interrupted specification, launch ID and outer session (if bound).")
             workflow.write_json(workflow.git_home(repo) / "entry-recovery.json",
                                 {"entry": entry, "resolution": report})
             entry_path(repo).unlink()
@@ -227,7 +225,7 @@ def main():
     try:
         repo = Path(workflow.git(arguments.repo, "rev-parse", "--show-toplevel"))
         spec_path = Path(arguments.spec)
-        spec = workflow.repository_path(
+        spec = workflow.tracker_reference(
             spec_path.resolve().relative_to(repo).as_posix() if spec_path.is_absolute() else arguments.spec,
         )
         report = json.loads(Path(arguments.report).read_text(encoding="utf-8")) if arguments.report else None
