@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import time
+import uuid
 
 import configuration
+import platform_support
 import workflow
 
 
 def session_id():
     selected = os.environ.get("CODEX_THREAD_ID")
     if not selected:
-        raise workflow.WorkflowError("Current-session mode requires the invoking Codex session.")
+        raise workflow.WorkflowError("Entry requires the invoking native Codex session.")
     return selected
 
 
@@ -22,19 +25,22 @@ def entry_path(repo):
     return workflow.git_home(repo) / "entry.json"
 
 
-def owned_entry(repo, spec):
+def owned_entry(repo, spec, admission=False):
+    spec = workflow.repository_path(spec)
     path = entry_path(repo)
     if not path.exists():
-        raise workflow.WorkflowError("No current-session checkout lock. Run entry.py start first.")
-    entry = json.loads(path.read_text())
-    if entry["outer_session"] != session_id() or entry["spec"] != spec:
+        raise workflow.WorkflowError("No checkout ownership. Run entry.py start first.")
+    entry = json.loads(path.read_text(encoding="utf-8"))
+    workflow.require_entry_context(entry)
+    unbound = admission and entry["mode"] == "dedicated" and entry["outer_session"] is None
+    if (not unbound and entry["outer_session"] != session_id()) or entry["spec"] != spec:
         raise workflow.WorkflowError("This checkout entry belongs to a different outer session or PRD.")
     if entry.get("release"):
         raise workflow.WorkflowError("Checkout release is already pending.")
     try:
         with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
             pass
-    except workflow.WorkflowError:
+    except workflow.LockContended:
         return entry
     raise workflow.WorkflowError("The lock holder stopped. Confirm old workers are inactive, then recover.")
 
@@ -44,34 +50,74 @@ def require_inactive(report):
         raise workflow.WorkflowError("Confirm all old workflow agents are closed, with concrete evidence.")
 
 
-def hold(repo, spec, branch=None, resume=False):
-    workflow.verify_configuration()
-    owner = session_id()
-    workflow.relative_file(repo, spec)
-    with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
+def create_ownership(repo, spec, mode, executable, branch=None, resume=False,
+                     outer=None, selected_branch=None, expected_outer=None):
+    """Persist ownership while the caller retains the checkout lock."""
+    with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
         if entry_path(repo).exists():
             raise workflow.WorkflowError("A previous entry was interrupted. Confirm inactive workers, then recover.")
         entry = {
-            "mode": "current", "phase": "preflight", "outer_session": owner,
+            "mode": mode, "launch_id": str(uuid.uuid4()), "phase": "preflight",
+            "outer_session": outer, "expected_outer_session": expected_outer,
             "spec": spec, "requested_branch": branch, "resume": resume,
-            "started": time.time(), "runtime": workflow.runtime_version(),
+            "started": time.time(), "runtime": workflow.runtime_version(executable),
+            "codex_executable": str(executable), "branch": selected_branch,
             "config_fingerprint": workflow.config_fingerprint(),
         }
         workflow.write_json(entry_path(repo), entry)
+        return entry
+
+
+def complete_release(repo, launch_id):
+    """Clear valid shutdown evidence while the caller retains the checkout lock."""
+    with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
+        entry = json.loads(entry_path(repo).read_text(encoding="utf-8"))
+        if entry.get("launch_id") != launch_id:
+            raise workflow.WorkflowError("Checkout ownership changed while the holder was running.")
+        release = entry.get("release", {})
+        if (entry["phase"] != "releasing" or release.get("launch_id") != launch_id
+                or release.get("previous_workers_inactive") is not True or not release.get("evidence")):
+            return False
+        entry_path(repo).unlink()
+        return True
+
+
+def hold(repo, spec, branch=None, resume=False):
+    spec = workflow.repository_path(spec)
+    workflow.verify_configuration()
+    executable = platform_support.resolve_codex()
+    owner = session_id()
+    workflow.relative_file(repo, spec)
+    with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
+        entry = create_ownership(repo, spec, "current", executable, branch, resume, outer=owner)
         print(json.dumps(entry), flush=True)
         while True:
-            current = json.loads(entry_path(repo).read_text())
+            current = json.loads(entry_path(repo).read_text(encoding="utf-8"))
             if current.get("release"):
-                entry_path(repo).unlink()
-                return 0
+                try:
+                    if complete_release(repo, entry["launch_id"]):
+                        return 0
+                except workflow.LockContended:
+                    pass
             time.sleep(0.2)
 
 
 def admit(repo, spec, report=None):
     with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
-        entry = owned_entry(repo, spec)
+        entry = owned_entry(repo, spec, admission=True)
+        owner = session_id()
+        if entry["mode"] == "dedicated":
+            native = workflow.session_metadata(owner)
+            source = native.get("source")
+            if (not source or (isinstance(source, dict) and "subagent" in source)
+                    or Path(native["cwd"]).resolve() != Path(repo).resolve()
+                    or (entry["resume"] and owner != entry["expected_outer_session"])
+                    or (not entry["resume"] and datetime.datetime.fromisoformat(native["timestamp"]).timestamp() < entry["started"])):
+                raise workflow.WorkflowError("Dedicated admission requires the matching native outer session and checkout.")
+            if entry["branch"] != workflow.git(repo, "branch", "--show-current"):
+                raise workflow.WorkflowError("Dedicated admission branch changed after launch.")
         workflow.verify_configuration()
-        if (entry["runtime"] != workflow.runtime_version()
+        if (entry["runtime"] != workflow.runtime_version(entry["codex_executable"])
                 or entry["config_fingerprint"] != workflow.config_fingerprint()):
             raise workflow.WorkflowError("Runtime or settings changed during admission. Stop and start again.")
         if entry["phase"] == "admitted":
@@ -87,19 +133,23 @@ def admit(repo, spec, report=None):
                 run = workflow.Run(repo, spec)
                 if not run.data or report.get("previous_outer_session") != run.data.get("outer_session"):
                     raise workflow.WorkflowError("Resume must identify the saved outer session and inactive workers.")
-                run.data.setdefault("handovers", []).append({
-                    "from": run.data.get("outer_session"), "to": entry["outer_session"], "evidence": report["evidence"],
-                })
-                run.data["outer_session"] = entry["outer_session"]
-                workflow.write_json(run.path, run.data)
-                workflow.write_json(workflow.relative_file(repo, run.record), run.data)
+                if entry["mode"] == "dedicated":
+                    if run.data["outer_session"] != owner:
+                        raise workflow.WorkflowError("Dedicated resume must retain the saved outer session.")
+                else:
+                    run.data.setdefault("handovers", []).append({
+                        "from": run.data.get("outer_session"), "to": owner, "evidence": report["evidence"],
+                    })
+                    run.data["outer_session"] = owner
+                    workflow.write_json(run.path, run.data)
+                    workflow.write_json(workflow.relative_file(repo, run.record), run.data)
             selected = run.data["branch"]
         else:
-            selected = workflow.choose_branch(repo, spec, entry["requested_branch"])
+            selected = workflow.choose_branch(repo, spec, entry["branch"] if entry["mode"] == "dedicated" else entry["requested_branch"])
             if workflow.Run(repo, spec).data:
                 raise workflow.WorkflowError("Run already exists on this branch. Stop, then start with --resume.")
-        workflow.relative_file(repo, spec).read_text()
-        entry.update(phase="admitted", admitted_at=time.time(), branch=selected)
+        workflow.relative_file(repo, spec).read_text(encoding="utf-8")
+        entry.update(phase="admitted", admitted_at=time.time(), branch=selected, outer_session=owner)
         workflow.write_json(entry_path(repo), entry)
         return entry
 
@@ -136,19 +186,29 @@ def stop(repo, spec, report):
     require_inactive(report)
     with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
         entry = owned_entry(repo, spec)
+        if report.get("launch_id") != entry["launch_id"]:
+            raise workflow.WorkflowError("Release evidence must identify the matching launch ID.")
+        if entry["mode"] == "dedicated" and entry["phase"] != "admitted":
+            raise workflow.WorkflowError("Dedicated release requires an admitted outer session.")
         entry["release"] = report
+        entry["phase"] = "releasing"
         workflow.write_json(entry_path(repo), entry)
 
 
 def recover(repo, spec, report):
+    spec = workflow.repository_path(spec)
     require_inactive(report)
     with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
-        entry = json.loads(entry_path(repo).read_text())
-        if entry["spec"] != spec or report.get("previous_outer_session") != entry["outer_session"]:
-            raise workflow.WorkflowError("Recovery must identify the interrupted PRD and outer session.")
-        workflow.write_json(workflow.git_home(repo) / "entry-recovery.json",
-                            {"entry": entry, "resolution": report})
-        entry_path(repo).unlink()
+        with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
+            entry = json.loads(entry_path(repo).read_text(encoding="utf-8"))
+            if not entry.get("launch_id"):
+                raise workflow.WorkflowError("Legacy ownership must be recovered with the previous helper before upgrading.")
+            if (entry["spec"] != spec or report.get("launch_id") != entry["launch_id"]
+                    or report.get("previous_outer_session") != entry["outer_session"]):
+                raise workflow.WorkflowError("Recovery must identify the interrupted PRD, launch ID and outer session (if bound).")
+            workflow.write_json(workflow.git_home(repo) / "entry-recovery.json",
+                                {"entry": entry, "resolution": report})
+            entry_path(repo).unlink()
 
 
 def main():
@@ -167,8 +227,10 @@ def main():
     try:
         repo = Path(workflow.git(arguments.repo, "rev-parse", "--show-toplevel"))
         spec_path = Path(arguments.spec)
-        spec = str(spec_path.resolve().relative_to(repo)) if spec_path.is_absolute() else arguments.spec
-        report = json.loads(Path(arguments.report).read_text()) if arguments.report else None
+        spec = workflow.repository_path(
+            spec_path.resolve().relative_to(repo).as_posix() if spec_path.is_absolute() else arguments.spec,
+        )
+        report = json.loads(Path(arguments.report).read_text(encoding="utf-8")) if arguments.report else None
         if arguments.action == "start":
             mode = arguments.session or configuration.load()["default_session"]
             if mode == "new":
@@ -187,7 +249,8 @@ def main():
         else:
             recover(repo, spec, report)
         return 0
-    except (workflow.WorkflowError, OSError, ValueError, KeyError, TypeError,
+    except (workflow.WorkflowError, platform_support.LockError, platform_support.ExecutableError,
+            OSError, ValueError, KeyError, TypeError,
             subprocess.CalledProcessError) as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         return 2

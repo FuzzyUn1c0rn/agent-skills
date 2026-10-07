@@ -5,15 +5,20 @@ when the user authorizes more work after the repair allowance is exhausted.
 The outer owns finding assessment, repair tickets and the updated plan.
 The coordinator executes that plan through the existing ticket cycle.
 
+Use the selected interpreter, quoted helper path and external report directory
+from [runtime.md](runtime.md#helper-shell-paths-and-temporary-reports) for the
+workflow arguments below. Replace quoted `"SPEC"` with the repository-relative
+specification path and `<report-directory>` with the saved absolute directory.
+
 ## Assess and plan
 
-1. Close the auditor and all other workflow agents. In current-session mode,
+1. Close the auditor and all other workflow agents. In either entry mode,
    release any closed coordinator registration using [entry.md](entry.md).
    Keep the checkout lock while planning and running repairs.
 2. For a newly returned audit, commit its report using
-   `finish SPEC --report /tmp/audit.json`. On resume, reuse the already saved
+   `finish "SPEC" --report "<report-directory>/audit.json"`. On resume, reuse the already saved
    audit; an interrupted audit commit uses `reconcile-commit`. Inspect
-   `status SPEC` for the latest audit, current snapshot, allowance and remaining
+   `status "SPEC"` for the latest audit, current snapshot, allowance and remaining
    work. A complete PASS finishes the PRD.
 3. Assess every blocking finding against the approved PRD and repository rules.
    Classify it as `confirmed_blocker`, `advisory`, `unsupported` or `needs_human`,
@@ -28,7 +33,7 @@ The coordinator executes that plan through the existing ticket cycle.
    related tickets and which findings each repair must resolve. Group one
    finding's correction into one repair ticket; multiple findings may share it.
 5. Write the repair plan outside the checkout and call
-   `repair-audit SPEC --report /tmp/audit-repairs.json`. The guard validates the
+   `repair-audit "SPEC" --report "<report-directory>/audit-repairs.json"`. The guard validates the
    complete dependency graph, reopens or creates the ticket files, and commits
    the plan and execution record before workers start. The outer supplies new
    ticket content in the repository's format. Use this command instead of editing
@@ -49,7 +54,7 @@ the outer's decision never grants PASS. It consumes one audit-repair round.
 
 The initial audit is saved as `final-audit.md`. Later audits use
 `final-audit-002.md`, `final-audit-003.md`, and so on. Earlier reports remain
-unchanged. `status SPEC` identifies the latest report and committed audit.
+unchanged. `status "SPEC"` identifies the latest report and committed audit.
 
 ## Resume a pre-repair-workflow audit
 
@@ -67,7 +72,7 @@ reconciled before the old audit can be reused.
 
 ## Repair plan
 
-Bind the plan to the current post-audit snapshot from `status SPEC`, not the
+Bind the plan to the current post-audit snapshot from `status "SPEC"`, not the
 auditor's pre-commit snapshot. Classify every original blocking finding exactly
 once. Every confirmed blocker must appear in exactly one ticket's `finding_ids`.
 
@@ -150,7 +155,7 @@ be reused to replenish it.
    Continuing work grants repair attempts; it does not answer those questions
    or waive verification.
 3. Record the user's actual instruction and call
-   `continue-audit SPEC --report /tmp/audit-continuation.json`:
+   `continue-audit "SPEC" --report "<report-directory>/audit-continuation.json"`:
 
    ```json
    {

@@ -224,19 +224,16 @@ class AuditRepairTests(unittest.TestCase):
         restored.begin("ticket.md")
         self.assertEqual(5, restored.data["tickets"]["ticket.md"]["attempts"])
 
-    def test_new_session_initialization_belongs_to_the_native_outer(self):
-        child_source = {"subagent": {"thread_spawn": {
-            "parent_thread_id": "outer", "agent_role": "implementation_coordinator", "depth": 1,
-        }}}
-        with patch.dict(os.environ, {"IMPLEMENT_SPEC_LAUNCH": "1", "CODEX_THREAD_ID": "coordinator"}), \
-                patch.object(workflow, "session_metadata", return_value={"source": child_source}):
-            with self.assertRaisesRegex(workflow.WorkflowError, "outer"):
-                self.new_run()
-        self.assertIsNone(workflow.Run(self.repo, "PRD.md").data)
-        with patch.dict(os.environ, {"IMPLEMENT_SPEC_LAUNCH": "1", "CODEX_THREAD_ID": "outer"}), \
-                patch.object(workflow, "session_metadata", return_value={"source": "cli"}):
-            run = self.new_run()
-        self.assertEqual("outer", run.data["outer_session"])
+    def test_dedicated_markers_cannot_initialize_before_admission(self):
+        for caller in ("outer", "coordinator"):
+            with self.subTest(caller=caller), patch.dict(os.environ, {
+                "IMPLEMENT_SPEC_LAUNCH": "1",
+                "IMPLEMENT_SPEC_LAUNCH_ID": "unadmitted-launch",
+                "CODEX_THREAD_ID": caller,
+            }):
+                with self.assertRaisesRegex(workflow.WorkflowError, "admission"):
+                    self.new_run()
+                self.assertIsNone(workflow.Run(self.repo, "PRD.md").data)
 
     def test_prior_audits_cannot_be_edited_or_deleted_by_repair_workers(self):
         run = self.completed_run()

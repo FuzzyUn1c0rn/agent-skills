@@ -1,4 +1,5 @@
 from pathlib import Path
+import platform_support
 import tomllib
 
 
@@ -12,7 +13,7 @@ DEPTHS = {
 
 
 def load(path=None):
-    settings = tomllib.loads(Path(path or SETTINGS).read_text())
+    settings = tomllib.loads(Path(path or SETTINGS).read_text(encoding="utf-8"))
     if settings.get("default_session") not in {"current", "new"}:
         raise ValueError("default_session must be current or new.")
     rounds = settings.setdefault("audit_repair_rounds", 2)

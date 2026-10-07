@@ -4,6 +4,7 @@ import datetime
 import os
 from pathlib import Path
 import shutil
+import platform_support
 import tomllib
 import json
 import subprocess
@@ -15,7 +16,7 @@ def remove_project_setup(project, codex_home, confirmed_workflow_only=False):
     project = Path(project).resolve()
     codex_home = Path(codex_home).resolve()
     root = subprocess.check_output(
-        ["git", "-C", str(project), "rev-parse", "--show-toplevel"], text=True
+        ["git", "-C", str(project), "rev-parse", "--show-toplevel"], text=True, encoding="utf-8"
     ).strip()
     if Path(root).resolve() != project:
         raise RuntimeError("Project cleanup requires the repository root.")
@@ -30,8 +31,8 @@ def remove_project_setup(project, codex_home, confirmed_workflow_only=False):
             "and backups first. Confirm workflow-only ownership only if no prior user configuration "
             "was replaced; otherwise restore the confirmed original settings separately."
         )
-    original = target.read_text()
-    installed = tomllib.loads(original)
+    original = target.read_bytes()
+    installed = tomllib.loads(original.decode("utf-8"))
     expected = {
         "features": {"multi_agent": True, "multi_agent_v2": False},
         "agents": {
@@ -50,7 +51,7 @@ def remove_project_setup(project, codex_home, confirmed_workflow_only=False):
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup = codex_home / "backups" / f"implement-spec-project-removed-{timestamp}.toml"
     backup.parent.mkdir(parents=True, exist_ok=True)
-    backup.write_text(original)
+    backup.write_bytes(original)
     target.unlink()
     print(f"Removed workflow-only project configuration: {target}. Backup: {backup}")
     print("Existing sessions may retain loaded settings. Start a new session to use your normal defaults.")
@@ -79,7 +80,7 @@ def install(source, destination, codex_home):
     templates = [source / "assets" / "implement-spec.config.toml"]
     templates.extend(sorted((source / "assets" / "agents").glob("*.toml")))
     for template in templates:
-        content = template.read_text()
+        content = template.read_text(encoding="utf-8")
         role = settings["launcher"] if template.name.endswith(".config.toml") else settings["roles"][template.stem]
         content = content.replace('"@MODEL@"', json.dumps(role["model"]))
         content = content.replace('"@EFFORT@"', json.dumps(role["effort"]))
@@ -87,7 +88,7 @@ def install(source, destination, codex_home):
             content = content.replace(token, value)
         tomllib.loads(content)
         target = codex_home / template.name if template.name.endswith(".config.toml") else agent_root / template.name
-        files[target] = content.encode()
+        files[target] = content.encode("utf-8")
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     backup = codex_home / "backups" / f"implement-spec-{timestamp}"
     for target, content in files.items():

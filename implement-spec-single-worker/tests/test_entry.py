@@ -1,10 +1,11 @@
 import json
 import os
 from pathlib import Path
-import selectors
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import datetime
 from unittest.mock import patch
@@ -14,16 +15,53 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import configuration
 import install
 import workflow
+import entry
+import platform_support
+from test_support import isolate_environment
+
+
+HELPER_TIMEOUT = 30
 
 
 class EntryTests(unittest.TestCase):
+    def test_current_entry_records_the_selected_absolute_executable(self):
+        _, started = self.start()
+        self.assertEqual(str(Path(sys.executable).resolve()), started["codex_executable"])
+
+    def test_admission_and_guard_retain_the_entry_executable_after_override_changes(self):
+        self.start()
+        self.env["IMPLEMENT_SPEC_CODEX"] = str(self.root / "missing-codex")
+        admitted = self.command_result("admit")
+        self.assertEqual(0, admitted.returncode, admitted.stderr)
+        self.assertEqual(str(Path(sys.executable).resolve()), json.loads(admitted.stdout)["codex_executable"])
+        guarded = self.guard_result()
+        self.assertEqual(2, guarded.returncode)
+        self.assertIn("missing-plan", guarded.stderr)
+        self.assertNotIn("Codex executable", guarded.stderr)
+
+    def test_lock_backend_failure_cannot_authorize_admission_or_state_mutation(self):
+        import portalocker
+
+        self.start()
+        ownership = entry.entry_path(self.repo).read_bytes()
+        with patch.dict(os.environ, self.env), patch(
+            "portalocker.portalocker.lock", side_effect=portalocker.LockException("backend unavailable"),
+        ):
+            with self.assertRaises(platform_support.LockError):
+                entry.owned_entry(self.repo, "PRD.md")
+            with self.assertRaises(platform_support.LockError):
+                workflow.verify_checkout_entry(self.repo, "PRD.md")
+        self.assertEqual(ownership, entry.entry_path(self.repo).read_bytes())
+
     def setUp(self):
+        isolate_environment(self)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.repo = self.root / "repo"
         self.repo.mkdir()
         workflow.git(self.repo, "init", "-b", "main")
+        (self.repo / ".git/hooks").mkdir(exist_ok=True)
         workflow.git(self.repo, "config", "user.name", "Entry test")
         workflow.git(self.repo, "config", "user.email", "entry@example.invalid")
         (self.repo / "PRD.md").write_text("Status: ready-for-agent\n")
@@ -36,16 +74,11 @@ class EntryTests(unittest.TestCase):
         tdd.write_text("TDD fixture")
         source = Path(__file__).resolve().parents[1]
         install.install(source, self.skill, self.home)
-        binary = self.root / "bin"
-        binary.mkdir()
-        codex = binary / "codex"
-        codex.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
-                         'echo "codex-cli fixture"\nelse\n'
-                         'echo "UNEXPECTED_CODEX_LAUNCH" >&2\nexit 99\nfi\n')
-        codex.chmod(0o755)
         self.env = dict(os.environ, CODEX_HOME=str(self.home),
-                        CODEX_THREAD_ID="selected-outer", PATH=str(binary) + ":" + os.environ["PATH"])
-        self.command = [sys.executable, str(self.skill / "scripts/entry.py")]
+                        CODEX_THREAD_ID="selected-outer", IMPLEMENT_SPEC_CODEX=sys.executable)
+        self.harness = str(Path(__file__).with_name("helper_harness.py"))
+        self.command = [sys.executable, self.harness, str(self.skill / "scripts/entry.py")]
+        self.workflow_command = [sys.executable, self.harness, str(self.skill / "scripts/workflow.py")]
 
     def start(self, *options):
         process = subprocess.Popen(
@@ -55,12 +88,11 @@ class EntryTests(unittest.TestCase):
         def cleanup():
             if process.poll() is None:
                 process.terminate()
-            process.communicate(timeout=5)
+            process.communicate(timeout=HELPER_TIMEOUT)
         self.addCleanup(cleanup)
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            self.assertTrue(selector.select(5), "Current-session entry did not report readiness")
-        line = process.stdout.readline()
+        ready = queue.Queue()
+        threading.Thread(target=lambda: ready.put(process.stdout.readline()), daemon=True).start()
+        line = ready.get(timeout=HELPER_TIMEOUT)
         if not line:
             self.fail(process.stderr.read())
         return process, json.loads(line)
@@ -68,10 +100,14 @@ class EntryTests(unittest.TestCase):
     def command_result(self, action, report=None):
         command = self.command + [action, "PRD.md", "--repo", str(self.repo), "--session", "current"]
         if report is not None:
+            report = dict(report)
+            if action in {"stop", "recover"}:
+                ownership = json.loads((workflow.git_home(self.repo) / "entry.json").read_text(encoding="utf-8"))
+                report.setdefault("launch_id", ownership["launch_id"])
             path = self.root / "report.json"
             path.write_text(json.dumps(report))
             command += ["--report", str(path)]
-        return subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=5)
+        return subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=HELPER_TIMEOUT)
 
     def test_current_entry_holds_common_lock_without_launching_or_switching_branch(self):
         process, entry = self.start()
@@ -89,7 +125,7 @@ class EntryTests(unittest.TestCase):
             "previous_workers_inactive": True, "evidence": "No workflow agents were started.",
         })
         self.assertEqual(0, released.returncode, released.stderr)
-        self.assertEqual(0, process.wait(timeout=5))
+        self.assertEqual(0, process.wait(timeout=HELPER_TIMEOUT))
         with workflow.exclusive(workflow.git_home(self.repo) / "launch.lock"):
             pass
         self.assertFalse((workflow.git_home(self.repo) / "entry.json").exists())
@@ -97,7 +133,7 @@ class EntryTests(unittest.TestCase):
     def test_crashed_entry_requires_explicit_inactive_worker_recovery(self):
         process, entry = self.start()
         process.kill()
-        process.wait(timeout=5)
+        process.wait(timeout=HELPER_TIMEOUT)
         failed = self.command_result("start")
         self.assertEqual(2, failed.returncode)
         self.assertIn("recover", failed.stderr)
@@ -185,30 +221,27 @@ class EntryTests(unittest.TestCase):
     def test_guard_rejects_mutation_before_current_session_admission(self):
         self.start()
         result = subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "init", "PRD.md",
-             "--repo", str(self.repo), "--plan", "/missing-plan"],
+            self.workflow_command + ["init", "PRD.md",
+             "--repo", str(self.repo), "--plan", str(self.root / "missing-plan.json")],
             env=self.env, capture_output=True, text=True,
         )
         self.assertEqual(2, result.returncode)
         self.assertIn("admission", result.stderr)
 
     def test_new_session_uses_configured_launcher_and_marks_the_attached_outer(self):
-        binary = self.root / "bin/codex"
         capture = self.root / "launch.json"
-        binary.write_text(
-            f"#!{sys.executable}\nimport json, os, sys\n"
-            "if sys.argv[1:] == ['--version']:\n    print('codex-cli fixture')\n"
-            f"else:\n    open({str(capture)!r}, 'w').write(json.dumps("
-            "{'arguments': sys.argv[1:], 'attached': os.environ.get('IMPLEMENT_SPEC_LAUNCH')}))\n"
-        )
-        binary.chmod(0o755)
+        version_capture = self.root / "version.json"
+        self.env.update(IMPLEMENT_SPEC_TEST_LAUNCH_CAPTURE=str(capture),
+                        IMPLEMENT_SPEC_TEST_VERSION_CAPTURE=str(version_capture))
         (self.skill / "references/runtime-evidence.json").unlink(missing_ok=True)
         result = subprocess.run(
             self.command + ["start", "PRD.md", "--repo", str(self.repo), "--session", "new"],
-            env=self.env, capture_output=True, text=True, timeout=5,
+            env=self.env, capture_output=True, text=True, timeout=HELPER_TIMEOUT,
         )
         self.assertEqual(0, result.returncode, result.stderr)
         launched = json.loads(capture.read_text())
+        self.assertEqual(str(Path(sys.executable).resolve()), launched["executable"])
+        self.assertEqual([launched["executable"], "--version"], json.loads(version_capture.read_text()))
         selected = configuration.load()["launcher"]
         self.assertIn("model=" + json.dumps(selected["model"]), launched["arguments"])
         self.assertIn("model_reasoning_effort=" + json.dumps(selected["effort"]), launched["arguments"])
@@ -224,20 +257,21 @@ class EntryTests(unittest.TestCase):
     def test_doctor_checks_local_configuration_without_starting_codex_agents(self):
         (self.skill / "references/runtime-evidence.json").unlink(missing_ok=True)
         result = subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "doctor"],
-            env=self.env, capture_output=True, text=True, timeout=5,
+            self.workflow_command + ["doctor"],
+            env=self.env, capture_output=True, text=True, timeout=HELPER_TIMEOUT,
         )
         self.assertEqual(0, result.returncode, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual("codex-cli fixture", report["runtime"])
+        self.assertEqual(str(Path(sys.executable).resolve()), report["codex_executable"])
         self.assertEqual({"installed_models": True}, report["checks"])
         self.assertFalse((self.home / "sessions").exists())
 
     def guard_result(self, environment=None):
         return subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "init", "PRD.md",
-             "--repo", str(self.repo), "--plan", "/missing-plan"],
-            env=environment or self.env, capture_output=True, text=True, timeout=5,
+            self.workflow_command + ["init", "PRD.md",
+             "--repo", str(self.repo), "--plan", str(self.root / "missing-plan.json")],
+            env=environment or self.env, capture_output=True, text=True, timeout=HELPER_TIMEOUT,
         )
 
     def test_current_guard_rejects_unrelated_and_former_owners(self):
@@ -271,7 +305,7 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(original, config.read_text())
         config.unlink()
         result = self.guard_result()
-        self.assertIn("/missing-plan", result.stderr)
+        self.assertIn("missing-plan.json", result.stderr)
         self.assertNotIn("stale", result.stderr)
 
     def test_only_the_registered_fresh_coordinator_can_mutate(self):
@@ -279,7 +313,7 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(0, self.command_result("admit").returncode)
         command = self.command + ["coordinator", "PRD.md", "--repo", str(self.repo), "--agent"]
         rejected = subprocess.run(command + ["implementation_coordinator"], env=self.env,
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=HELPER_TIMEOUT)
         self.assertEqual(2, rejected.returncode)
         folder = self.home / "sessions" / datetime.datetime.now(datetime.timezone.utc).strftime("%Y/%m/%d")
         folder.mkdir(parents=True)
@@ -295,17 +329,17 @@ class EntryTests(unittest.TestCase):
             }
             (folder / f"rollout-{identifier}.jsonl").write_text(json.dumps(event) + "\n")
         admitted = subprocess.run(command + ["actual-coordinator"], env=self.env,
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=HELPER_TIMEOUT)
         self.assertEqual(0, admitted.returncode, admitted.stderr)
         authorized = self.guard_result(dict(self.env, CODEX_THREAD_ID="actual-coordinator"))
-        self.assertIn("/missing-plan", authorized.stderr)
+        self.assertIn("missing-plan.json", authorized.stderr)
         plan = self.root / "coordinator-init.json"
         plan.write_text(json.dumps({"spec": "PRD.md"}))
         rejected_init = subprocess.run(
-            [sys.executable, str(self.skill / "scripts/workflow.py"), "init", "PRD.md",
+            self.workflow_command + ["init", "PRD.md",
              "--repo", str(self.repo), "--plan", str(plan)],
             env=dict(self.env, CODEX_THREAD_ID="actual-coordinator"),
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=HELPER_TIMEOUT,
         )
         self.assertEqual(2, rejected_init.returncode)
         self.assertIn("Only the admitted outer", rejected_init.stderr)
@@ -313,7 +347,7 @@ class EntryTests(unittest.TestCase):
         unauthorized = self.guard_result(dict(self.env, CODEX_THREAD_ID="other-coordinator"))
         self.assertIn("owner", unauthorized.stderr)
         replaced = subprocess.run(command + ["other-coordinator"], env=self.env,
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=HELPER_TIMEOUT)
         self.assertEqual(2, replaced.returncode)
         missing_evidence = self.command_result("release-coordinator", {"coordinator": "actual-coordinator"})
         self.assertEqual(2, missing_evidence.returncode)
@@ -330,13 +364,13 @@ class EntryTests(unittest.TestCase):
         former = self.guard_result(dict(self.env, CODEX_THREAD_ID="actual-coordinator"))
         self.assertIn("owner", former.stderr)
         reused = subprocess.run(command + ["actual-coordinator"], env=self.env,
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=HELPER_TIMEOUT)
         self.assertEqual(2, reused.returncode)
         replacement = subprocess.run(command + ["other-coordinator"], env=self.env,
-                                     capture_output=True, text=True, timeout=5)
+                                     capture_output=True, text=True, timeout=HELPER_TIMEOUT)
         self.assertEqual(0, replacement.returncode, replacement.stderr)
         authorized = self.guard_result(dict(self.env, CODEX_THREAD_ID="other-coordinator"))
-        self.assertIn("/missing-plan", authorized.stderr)
+        self.assertIn("missing-plan.json", authorized.stderr)
         entry = json.loads(self.command_result("status").stdout)
         self.assertEqual("actual-coordinator", entry["closed_coordinators"][0]["coordinator"])
 
@@ -387,10 +421,10 @@ class EntryTests(unittest.TestCase):
                 report_path = self.root / "audit-command.json"
                 report_path.write_text(json.dumps(report))
                 command = [
-                    sys.executable, str(self.skill / "scripts/workflow.py"), "repair-audit", "PRD.md",
+                    *self.workflow_command, "repair-audit", "PRD.md",
                     "--repo", str(self.repo), "--report", str(report_path),
                 ]
-                result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=5)
+                result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=HELPER_TIMEOUT)
                 if round_number < 2:
                     self.assertEqual(0, result.returncode, result.stderr)
                 else:
@@ -402,8 +436,8 @@ class EntryTests(unittest.TestCase):
                 "previous_workers_inactive": True, "evidence": "User reviewed the stopped run.",
                 "user_authorization": "Continue working on the audit defects.",
             }))
-            command[2] = "continue-audit"
-            result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=5)
+            command[len(self.workflow_command)] = "continue-audit"
+            result = subprocess.run(command, env=self.env, capture_output=True, text=True, timeout=HELPER_TIMEOUT)
             self.assertEqual(0, result.returncode, result.stderr)
             restored = workflow.Run(self.repo, "PRD.md")
             self.assertEqual(2, restored.data["audit_cycles"][-1]["number"])

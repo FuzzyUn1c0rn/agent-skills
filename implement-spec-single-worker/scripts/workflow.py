@@ -3,15 +3,16 @@ import subprocess
 import re
 import hashlib
 import os
-import fcntl
 import json
 import tempfile
 import argparse
 import sys
+import time
+import platform_support
 import tomllib
 import copy
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import configuration
 import datetime
@@ -21,16 +22,17 @@ class WorkflowError(RuntimeError):
     pass
 
 
+class LockContended(WorkflowError, platform_support.LockContended):
+    pass
+
+
 @contextmanager
 def exclusive(path):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise WorkflowError("Another workflow operation owns this checkout.") from error
-        yield handle.fileno()
+    try:
+        with platform_support.exclusive(path) as descriptor:
+            yield descriptor
+    except platform_support.LockContended as error:
+        raise LockContended(str(error)) from error
 
 
 def git(repo, *arguments):
@@ -38,6 +40,7 @@ def git(repo, *arguments):
         ["git", "-C", str(repo), *arguments],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     if result.returncode:
@@ -45,7 +48,17 @@ def git(repo, *arguments):
     return result.stdout.strip()
 
 
+def git_paths(repo, *arguments):
+    result = subprocess.run(
+        ["git", "-C", str(repo), *arguments, "-z"], capture_output=True, check=False,
+    )
+    if result.returncode:
+        raise WorkflowError(result.stderr.decode("utf-8", errors="replace").strip())
+    return {name.decode("utf-8") for name in result.stdout.split(b"\0") if name}
+
+
 def choose_branch(repo, spec, requested=None):
+    spec = repository_path(spec)
     current = git(repo, "branch", "--show-current")
     if not current:
         raise WorkflowError("Detached HEAD: select a branch before starting.")
@@ -77,7 +90,7 @@ def choose_branch(repo, spec, requested=None):
 
 def snapshot(repo, excluded=(), include_index=True):
     root = Path(repo)
-    excluded = set(excluded)
+    excluded = {repository_path(name) for name in excluded}
     paths = subprocess.check_output(
         ["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
     ).decode().split("\0")
@@ -109,7 +122,8 @@ def snapshot(repo, excluded=(), include_index=True):
 def validate_pass(report, ticket, checks, fingerprint, finding_ids=()):
     if report.get("verdict") != "PASS":
         raise WorkflowError("Verification did not pass.")
-    if report.get("ticket") != ticket["path"] or report.get("reviewed_snapshot") != fingerprint:
+    if (repository_path(report.get("ticket")) != repository_path(ticket["path"])
+            or report.get("reviewed_snapshot") != fingerprint):
         raise WorkflowError("Verification does not match this ticket and working tree.")
     if report.get("blocking_findings") != [] or report.get("unavailable_checks") != []:
         raise WorkflowError("Blocking findings or unavailable checks prevent PASS.")
@@ -141,7 +155,7 @@ def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".workflow-")
     try:
-        with os.fdopen(descriptor, "w") as stream:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             json.dump(value, stream, indent=2)
             stream.write("\n")
             stream.flush()
@@ -156,11 +170,43 @@ def git_home(repo):
     return Path(git(repo, "rev-parse", "--absolute-git-dir")) / "implement-spec"
 
 
+def repository_path(name):
+    if not isinstance(name, str) or not name or "\0" in name:
+        raise WorkflowError(f"Expected a repository-relative file path: {name}")
+    path = PurePosixPath(name.replace(os.sep, "/"))
+    if (path.is_absolute() or PureWindowsPath(name).drive
+            or any(part in {"..", ".git"} for part in path.parts) or not path.parts):
+        raise WorkflowError(f"Expected a repository-relative file without traversal: {name}")
+    return path.as_posix()
+
+
+def ticket_paths(ticket):
+    ticket = copy.deepcopy(ticket)
+    ticket["path"] = repository_path(ticket["path"])
+    for field in ("blocked_by", "related_tickets"):
+        if field in ticket:
+            ticket[field] = [repository_path(name) for name in ticket[field]]
+    return ticket
+
+
+def report_paths(report):
+    report = copy.deepcopy(report)
+    if "ticket" in report:
+        report["ticket"] = repository_path(report["ticket"])
+    if "tickets" in report:
+        report["tickets"] = [ticket_paths(ticket) for ticket in report["tickets"]]
+    return report
+
+
 def relative_file(repo, name):
+    name = repository_path(name)
     root = Path(repo).resolve()
     candidate = root / name
-    if Path(name).is_absolute() or candidate.is_symlink():
-        raise WorkflowError(f"Expected a repository-relative regular file: {name}")
+    current = root
+    for part in PurePosixPath(name).parts:
+        current = current / part
+        if current.is_symlink():
+            raise WorkflowError(f"Expected a repository-relative regular file: {name}")
     try:
         candidate.resolve().relative_to(root)
     except ValueError as error:
@@ -169,8 +215,8 @@ def relative_file(repo, name):
 
 
 def status_text(path):
-    matches = re.findall(r"^Status: (.+)$", path.read_text(), flags=re.MULTILINE)
-    if len(matches) != 1:
+    matches = re.findall(r"^Status: ([^\r\n]*)\r?$", path.read_bytes().decode("utf-8"), flags=re.MULTILINE)
+    if len(matches) != 1 or not matches[0]:
         raise WorkflowError(f"Expected one Status line in {path}")
     return matches[0]
 
@@ -179,8 +225,8 @@ def set_status(path, label):
     status_text(path)
     if not label or "\n" in label or "\r" in label:
         raise WorkflowError("Invalid tracker label.")
-    path.write_text(re.sub(r"^Status: .+$", lambda match: f"Status: {label}",
-                           path.read_text(), count=1, flags=re.MULTILINE))
+    path.write_bytes(re.sub(rb"^Status: [^\r\n]+", lambda match: f"Status: {label}".encode("utf-8"),
+                           path.read_bytes(), count=1, flags=re.MULTILINE))
 
 
 def validate_graph(tickets):
@@ -211,13 +257,14 @@ def audit_cycle(number, authorization, round_limit=None):
 class Run:
     def __init__(self, repo, spec):
         self.repo = Path(repo).resolve()
+        spec = repository_path(spec)
         relative_file(self.repo, spec)
         self.spec = spec
         branch = git(self.repo, "branch", "--show-current")
         identity = hashlib.sha256((spec + "\0" + branch).encode()).hexdigest()[:20]
         self.path = git_home(self.repo) / "runs" / identity / "state.json"
-        self.record = str(Path(spec).parent / "implementation-run.json")
-        self.data = json.loads(self.path.read_text()) if self.path.exists() else None
+        self.record = (Path(spec).parent / "implementation-run.json").as_posix()
+        self.data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else None
         if self.data:
             self.data.setdefault("audit_cycles", [
                 audit_cycle(1, self.data["plan"]["approval_evidence"]),
@@ -229,23 +276,26 @@ class Run:
                     pending = transaction.get("kind") == "audit"
                     self.data["audits"].append({
                         "number": 1, "report": copy.deepcopy(self.data["audit"]),
-                        "path": str(Path(spec).parent / "final-audit.md"),
+                        "path": (Path(spec).parent / "final-audit.md").as_posix(),
                         "commit": None if pending else self.data["head"], "cycle": 1,
                     })
 
     def create(self, plan):
+        plan = copy.deepcopy(plan)
+        plan["spec"] = repository_path(plan.get("spec"))
+        plan["tickets"] = [ticket_paths(ticket) for ticket in plan.get("tickets", [])]
         if self.data is not None:
             raise WorkflowError("A run record already exists. Resume it instead of overwriting it.")
         entry_path = git_home(self.repo) / "entry.json"
         if entry_path.exists():
-            owner = json.loads(entry_path.read_text())["outer_session"]
-            if os.environ.get("CODEX_THREAD_ID") != owner:
+            ownership = json.loads(entry_path.read_text(encoding="utf-8"))
+            require_entry_context(ownership)
+            owner = ownership["outer_session"]
+            if (not owner or os.environ.get("CODEX_THREAD_ID") != owner
+                    or ownership["phase"] != "admitted" or ownership.get("release")):
                 raise WorkflowError("Only the admitted outer session may initialize a run.")
         elif os.environ.get("IMPLEMENT_SPEC_LAUNCH") == "1":
-            session = session_metadata(os.environ.get("CODEX_THREAD_ID"))
-            source = session.get("source")
-            if not source or (isinstance(source, dict) and "subagent" in source):
-                raise WorkflowError("Only the launcher's outer session may initialize a run.")
+            raise WorkflowError("Dedicated admission is required before initializing a run.")
         if git(self.repo, "status", "--porcelain", "--untracked-files=all"):
             raise WorkflowError("Preflight requires a clean checkout; keep the draft plan outside it.")
         if plan.get("spec") != self.spec or not plan.get("checks"):
@@ -260,7 +310,7 @@ class Run:
             raise WorkflowError("Record the evidence for approved requirements and testing boundaries.")
         if not git(self.repo, "branch", "--show-current"):
             raise WorkflowError("Detached HEAD is not supported.")
-        relative_file(self.repo, self.spec).read_text()
+        relative_file(self.repo, self.spec).read_text(encoding="utf-8")
         tickets = plan.get("tickets", [])
         validate_graph(tickets)
         records = {}
@@ -315,10 +365,16 @@ class Run:
             if not audit.get("commit"):
                 continue
             path = relative_file(self.repo, audit["path"])
-            original = subprocess.check_output(
-                ["git", "-C", str(self.repo), "cat-file", "blob", f"{audit['commit']}:{audit['path']}"]
+            if not path.is_file():
+                raise WorkflowError(f"Historical audit report changed or disappeared: {audit['path']}")
+            canonical = subprocess.run(
+                ["git", "-C", str(self.repo), "hash-object", f"--path={audit['path']}", "--stdin"],
+                input=path.read_bytes(), capture_output=True, check=False,
             )
-            if not path.is_file() or path.read_bytes() != original:
+            if canonical.returncode:
+                raise WorkflowError(canonical.stderr.decode("utf-8", errors="replace").strip())
+            original = git(self.repo, "rev-parse", f"{audit['commit']}:{audit['path']}")
+            if canonical.stdout.decode("ascii").strip() != original:
                 raise WorkflowError(f"Historical audit report changed or disappeared: {audit['path']}")
 
     def ticket(self):
@@ -336,6 +392,7 @@ class Run:
             raise WorkflowError("Audit handoff needs the current snapshot and evidence that all workers closed.")
 
     def attempts_remaining(self, requested):
+        requested = repository_path(requested)
         record = self.data["tickets"][requested]
         remaining = record.get("attempt_limit", 3) - record["attempts"]
         if record.get("audit_findings"):
@@ -347,6 +404,7 @@ class Run:
         return remaining
 
     def begin(self, requested):
+        requested = repository_path(requested)
         self.ensure({"ready", "rework"}, checkpoint=True)
         if self.data["current"] not in (None, requested):
             raise WorkflowError("Another ticket is unfinished.")
@@ -392,6 +450,7 @@ class Run:
         self.save()
 
     def implemented(self, report):
+        report = report_paths(report)
         self.ensure({"implementing"})
         ticket = self.ticket()
         attempt = self.data["tickets"][ticket["path"]]["attempts"]
@@ -424,6 +483,7 @@ class Run:
         self.save()
 
     def reviewed(self, report):
+        report = report_paths(report)
         self.ensure({"reviewing"}, checkpoint=True)
         current = self.data["current"]
         record = self.data["tickets"][current]
@@ -481,6 +541,7 @@ class Run:
         self.data["phase"] = "adjudicating"
 
     def dispute(self, report):
+        report = report_paths(report)
         self.ensure({"rework", "blocked", "adjudicating"}, checkpoint=True)
         current = self.data["current"]
         if not current:
@@ -504,6 +565,7 @@ class Run:
         self.save()
 
     def adjudicate(self, report):
+        report = report_paths(report)
         self.ensure({"adjudicating"}, checkpoint=True)
         current = self.data["current"]
         record = self.data["tickets"][current]
@@ -594,20 +656,20 @@ class Run:
                 raise WorkflowError("Pending commit files changed; preserve them and request fresh verification.")
             for name, edit in edits.items():
                 path = relative_file(self.repo, name)
-                current = path.read_text() if path.exists() else None
+                current = path.read_bytes().decode("utf-8") if path.exists() else None
                 if current not in (edit["before"], edit["after"]):
                     raise WorkflowError("Pending repair ticket changed; preserve it and investigate.")
             for name, edit in edits.items():
                 path = relative_file(self.repo, name)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(edit["after"])
+                path.write_bytes(edit["after"].encode("utf-8"))
             if transaction["kind"] == "audit":
                 audit_path = relative_file(self.repo, transaction["audit_path"])
                 content = "# Implementation audit\n\n```json\n" + json.dumps(self.data["audit"], indent=2) + "\n```\n"
-                if audit_path.exists() and audit_path.read_text() != content:
+                if audit_path.exists() and audit_path.read_bytes().decode("utf-8") != content:
                     raise WorkflowError("Pending audit report was changed; preserve it and investigate.")
                 if not audit_path.exists():
-                    audit_path.write_text(content)
+                    audit_path.write_bytes(content.encode("utf-8"))
             set_status(status_path, transaction["new_status"])
             transaction["status_restored"] = False
             transaction["working_snapshot"] = snapshot(self.repo, [self.record], include_index=False)
@@ -619,12 +681,12 @@ class Run:
                 git(self.repo, "add", "--", *present)
             if missing:
                 git(self.repo, "update-index", "--force-remove", "--", *missing)
-            staged = set(git(self.repo, "diff", "--cached", "--name-only", "HEAD").splitlines())
+            staged = git_paths(self.repo, "diff", "--cached", "--name-only", "HEAD")
             if staged - set(transaction["paths"]):
                 raise WorkflowError("Unreviewed paths are staged outside the pending transaction.")
             expected_tree = git(self.repo, "write-tree")
             if transaction.get("tree") and transaction["tree"] != expected_tree:
-                differences = set(git(self.repo, "diff", "--name-only", transaction["tree"], expected_tree).splitlines())
+                differences = git_paths(self.repo, "diff", "--name-only", transaction["tree"], expected_tree)
                 if differences - {self.record}:
                     raise WorkflowError("Pending index differs from the recorded transaction.")
             transaction["tree"] = expected_tree
@@ -639,9 +701,9 @@ class Run:
                     self.save()
                 raise
             current_head = git(self.repo, "rev-parse", "HEAD")
-        dirty = set(git(self.repo, "diff", "--name-only", "HEAD").splitlines())
-        dirty.update(git(self.repo, "diff", "--cached", "--name-only", "HEAD").splitlines())
-        dirty.update(git(self.repo, "ls-files", "--others", "--exclude-standard").splitlines())
+        dirty = git_paths(self.repo, "diff", "--name-only", "HEAD")
+        dirty.update(git_paths(self.repo, "diff", "--cached", "--name-only", "HEAD"))
+        dirty.update(git_paths(self.repo, "ls-files", "--others", "--exclude-standard"))
         if (git(self.repo, "rev-parse", "HEAD^") != transaction["parent"]
                 or git(self.repo, "rev-parse", "HEAD^{tree}") != transaction.get("tree")
                 or dirty - {self.record}):
@@ -698,14 +760,14 @@ class Run:
         if (any(not isinstance(identifier, str) or not identifier.strip() for identifier in identifiers)
                 or len(identifiers) != len(set(identifiers))):
             raise WorkflowError("Audit findings need unique, stable identifiers.")
-        unexpected = set(git(self.repo, "diff", "--name-only", "HEAD").splitlines()) - {self.record}
-        unexpected.update(set(git(self.repo, "diff", "--cached", "--name-only", "HEAD").splitlines()) - {self.record})
-        untracked = set(git(self.repo, "ls-files", "--others", "--exclude-standard").splitlines()) - {self.record}
+        unexpected = git_paths(self.repo, "diff", "--name-only", "HEAD") - {self.record}
+        unexpected.update(git_paths(self.repo, "diff", "--cached", "--name-only", "HEAD") - {self.record})
+        untracked = git_paths(self.repo, "ls-files", "--others", "--exclude-standard") - {self.record}
         if unexpected or untracked:
             raise WorkflowError("Uncommitted implementation changes prevent the final audit commit.")
         number = len(self.data["audits"]) + 1
         filename = "final-audit.md" if number == 1 else f"final-audit-{number:03d}.md"
-        audit = str(Path(self.spec).parent / filename)
+        audit = (Path(self.spec).parent / filename).as_posix()
         audit_path = relative_file(self.repo, audit)
         if audit_path.exists():
             raise WorkflowError("An audit report already exists; preserve it and resolve the destination.")
@@ -744,6 +806,7 @@ class Run:
                       attempt_limit=record["attempts"] + 3)
 
     def repair_audit(self, report):
+        report = report_paths(report)
         self.ensure({"audit-blocked"}, checkpoint=True)
         self.require_handoff(report)
         audit = self.data["audits"][-1]
@@ -782,8 +845,7 @@ class Run:
         for change in changes:
             name = change["path"]
             path = relative_file(self.repo, name)
-            if (name in reserved or name in edits or str(Path(name)) != name
-                    or any(part in {"..", ".git"} for part in Path(name).parts)
+            if (name in reserved or name in edits
                     or not change.get("finding_ids") or not change.get("requirements")
                     or not set(change["requirements"]) <= set(plan["requirements"])):
                 raise WorkflowError("Repair tickets need distinct paths, audit findings and approved PRD requirements.")
@@ -792,8 +854,8 @@ class Run:
                     raise WorkflowError("Only a completed ticket in this plan can be reopened.")
                 if status_text(path) != plan.get("finished_ticket", "closed"):
                     raise WorkflowError("Completed ticket status differs from the saved run.")
-                before = path.read_text()
-                after = re.sub(r"^Status: .+$", lambda match: f"Status: {plan.get('ready_ticket', 'ready-for-agent')}",
+                before = path.read_bytes().decode("utf-8")
+                after = re.sub(r"^Status: [^\r\n]+", lambda match: f"Status: {plan.get('ready_ticket', 'ready-for-agent')}",
                                before, count=1, flags=re.MULTILINE)
                 record = updated["tickets"][name]
                 if not record.get("completions"):
@@ -804,7 +866,7 @@ class Run:
                 record["commit"] = None
                 record.pop("review_base", None)
             elif change.get("action") == "create":
-                if name in known or path.exists() or git(self.repo, "ls-files", "--", name):
+                if name in known or path.exists() or git(self.repo, "ls-files", "-z", "--", name):
                     raise WorkflowError("New repair ticket would overwrite an existing file or planned ticket.")
                 criteria = change.get("criteria", [])
                 if (change.get("execution") != "AFK" or not criteria
@@ -814,7 +876,7 @@ class Run:
                         or (change.get("kind", "behavior") == "behavior" and not change.get("seams"))):
                     raise WorkflowError("New repair tickets need AFK criteria and approved testing boundaries.")
                 after = change.get("content", "")
-                if re.findall(r"^Status: (.+)$", after, flags=re.MULTILINE) != [
+                if re.findall(r"^Status: ([^\r\n]*)\r?$", after, flags=re.MULTILINE) != [
                     plan.get("ready_ticket", "ready-for-agent"),
                 ]:
                     raise WorkflowError("New repair ticket content needs exactly one ready Status line.")
@@ -840,18 +902,19 @@ class Run:
                 raise WorkflowError("Ticket repair attempts exhausted in this allowance.")
             record["findings"] = [finding for finding in audit["report"]["blocking_findings"]
                                   if finding["id"] in change["finding_ids"]]
-            audit_link = os.path.relpath(self.repo / audit["path"], path.parent)
+            audit_link = Path(os.path.relpath(self.repo / audit["path"], path.parent)).as_posix()
+            newline = "\r\n" if "\r\n" in after else "\n"
             after += (
                 f"\n## Audit repair {audit['number']}\n\n"
                 f"Audit: [{audit['path']}]({audit_link})\n"
                 f"Findings: {', '.join(change['finding_ids'])}\n"
                 f"Requirements: {', '.join(change['requirements'])}\n"
-            )
+            ).replace("\n", newline)
             edits[name] = {"before": before, "after": after}
         validate_graph(plan["tickets"])
-        changed = set(git(self.repo, "diff", "--name-only", "HEAD").splitlines())
-        changed.update(git(self.repo, "diff", "--cached", "--name-only", "HEAD").splitlines())
-        changed.update(git(self.repo, "ls-files", "--others", "--exclude-standard").splitlines())
+        changed = git_paths(self.repo, "diff", "--name-only", "HEAD")
+        changed.update(git_paths(self.repo, "diff", "--cached", "--name-only", "HEAD"))
+        changed.update(git_paths(self.repo, "ls-files", "--others", "--exclude-standard"))
         if changed - {self.record}:
             raise WorkflowError("Audit repair planning requires the unchanged audited checkout.")
         updated["audit_cycles"][-1]["rounds"].append({
@@ -994,7 +1057,7 @@ def verify_configuration():
     expected = configuration.expectations()
     for path in config_paths():
         role = "outer" if path.name.endswith(".config.toml") else path.stem
-        installed = tomllib.loads(path.read_text())
+        installed = tomllib.loads(path.read_text(encoding="utf-8"))
         if (installed.get("model"), installed.get("model_reasoning_effort")) != expected[role][:2]:
             raise WorkflowError("Installed profiles differ from settings.toml. Run scripts/install.py.")
 
@@ -1004,11 +1067,11 @@ def session_metadata(identifier):
         raise WorkflowError("Missing or invalid Codex session identifier.")
     home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
     for path in home.rglob(f"*{identifier}.jsonl"):
-        with path.open() as stream:
+        with path.open(encoding="utf-8") as stream:
             event = json.loads(next(stream))
         if event.get("type") == "session_meta" and event["payload"].get("id") == identifier:
             return event["payload"]
-    raise WorkflowError("No native session metadata for the requested coordinator.")
+    raise WorkflowError("No native session metadata for the requested session.")
 
 
 def validate_coordinator(identifier, entry):
@@ -1022,14 +1085,16 @@ def validate_coordinator(identifier, entry):
         raise WorkflowError("Only a fresh named coordinator belonging to the admitted owner may mutate the run.")
 
 
-def runtime_version():
-    result = subprocess.run(["codex", "--version"], check=True, capture_output=True, text=True)
+def runtime_version(executable=None):
+    executable = executable if executable is not None else platform_support.resolve_codex()
+    result = subprocess.run([str(executable), "--version"], check=True, capture_output=True,
+                            text=True, encoding="utf-8")
     return result.stdout.strip()
 
 
 def enforced_config_arguments(include_outer_model=True):
     verify_configuration()
-    config = tomllib.loads(config_paths()[0].read_text())
+    config = tomllib.loads(config_paths()[0].read_text(encoding="utf-8"))
     values = {
         "agents.max_depth": config["agents"]["max_depth"],
     }
@@ -1042,54 +1107,65 @@ def enforced_config_arguments(include_outer_model=True):
 
 def configuration_status():
     verify_configuration()
+    executable = platform_support.resolve_codex()
     return {
-        "runtime": runtime_version(),
+        "runtime": runtime_version(executable),
+        "codex_executable": str(executable),
         "config_fingerprint": config_fingerprint(),
         "checks": {"installed_models": True},
         "scope": "Local configuration only. No agents or model calls are started.",
     }
 
 
+def require_entry_context(entry):
+    if not entry.get("launch_id"):
+        raise WorkflowError("Legacy checkout ownership has no launch ID. Finish or recover it with the previous helper before upgrading.")
+    if entry.get("mode") == "dedicated" and os.environ.get("IMPLEMENT_SPEC_LAUNCH_ID") != entry["launch_id"]:
+        raise WorkflowError("Dedicated launch ID does not match checkout ownership.")
+
+
 def verify_checkout_entry(repo, spec):
+    spec = repository_path(spec)
     locked = False
     try:
         with exclusive(git_home(repo) / "launch.lock"):
             pass
-    except WorkflowError:
+    except LockContended:
         locked = True
     if not locked:
         raise WorkflowError("No active checkout lock. Start the workflow entry before changing run state.")
     path = git_home(repo) / "entry.json"
     if path.exists():
-        entry = json.loads(path.read_text())
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        require_entry_context(entry)
         if (entry.get("phase") != "admitted" or entry.get("release")
                 or entry.get("spec") != spec
                 or entry.get("branch") != git(repo, "branch", "--show-current")
-                or entry.get("runtime") != runtime_version()
+                or entry.get("runtime") != runtime_version(entry["codex_executable"])
                 or entry.get("config_fingerprint") != config_fingerprint()):
-            raise WorkflowError("Current-session admission is missing or stale. Stop before ticket work.")
+            raise WorkflowError("Checkout admission is missing or stale. Stop before ticket work.")
         verify_configuration()
         caller = os.environ.get("CODEX_THREAD_ID")
         if not caller or caller not in {entry["outer_session"], entry.get("coordinator")}:
             raise WorkflowError("Caller is not the admitted owner or its registered coordinator.")
         if caller != entry["outer_session"]:
             validate_coordinator(caller, entry)
-    elif os.environ.get("IMPLEMENT_SPEC_LAUNCH") == "1":
-        verify_configuration()
     else:
         raise WorkflowError("Checkout lock is not attached to this workflow entry.")
 
 
 def launch(repo, spec, branch=None, resume=False):
+    import entry
+
+    spec = repository_path(spec)
     verify_configuration()
-    with exclusive(git_home(repo) / "launch.lock") as descriptor:
+    executable = platform_support.resolve_codex()
+    with exclusive(git_home(repo) / "launch.lock"):
         if (git_home(repo) / "entry.json").exists():
-            raise WorkflowError("An interrupted current-session entry needs entry.py recover before launching.")
-        command = ["codex", "--no-daemon", "--profile", "implement-spec", "--approve-for-me", "-C", str(repo)]
+            raise WorkflowError("Interrupted checkout ownership needs entry.py recover before launching.")
+        command = [str(executable), "--no-daemon", "--profile", "implement-spec", "--approve-for-me", "-C", str(repo)]
         command.extend(enforced_config_arguments())
-        attached = ("You are already the outer session opened by the dedicated launcher. "
-                    "The parent holds the checkout lock; IMPLEMENT_SPEC_LAUNCH=1. "
-                    "Do not run entry.py start or launch another outer. ")
+        expected_outer = None
         if resume:
             if branch and branch != git(repo, "branch", "--show-current"):
                 existing = git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines()
@@ -1103,17 +1179,38 @@ def launch(repo, spec, branch=None, resume=False):
                 raise WorkflowError("Requested branch conflicts with the saved run.")
             if git(repo, "branch", "--show-current") != run.data["branch"]:
                 raise WorkflowError("Check out the saved run branch before resuming; no changes were moved.")
-            prompt = attached + "Resume the approved $implement-spec-single-worker workflow. Reconcile state and confirm old workers are inactive before continuing. " + json.dumps({"spec": spec})
-            command.extend(["resume", run.data["outer_session"], prompt])
+            selected = run.data["branch"]
+            expected_outer = run.data["outer_session"]
         else:
             selected = choose_branch(repo, spec, branch)
             run = Run(repo, spec)
             if run.data:
                 raise WorkflowError("Run already exists on this branch. Use launch --resume.")
-            prompt = attached + "Use $implement-spec-single-worker to execute the approved AFK workflow. Read the skill before acting. " + json.dumps({"spec": spec, "branch": selected})
+        ownership = entry.create_ownership(repo, spec, "dedicated", executable, branch, resume,
+                                           selected_branch=selected, expected_outer=expected_outer)
+        print(json.dumps(ownership), flush=True)
+        prompt = ("You are already the outer session opened by the dedicated launcher. "
+                  "The parent holds the checkout lock. Read the skill and run entry.py admit "
+                  "before workflow mutations. Do not run entry.py start or launch another outer. "
+                  "Record launch-specific inactive-worker release evidence with entry.py stop before exiting. "
+                  + json.dumps({"spec": spec, "branch": selected, "launch_id": ownership["launch_id"],
+                                "codex_executable": str(executable), "runtime": ownership["runtime"]}))
+        if resume:
+            command.extend(["resume", expected_outer, prompt])
+        else:
             command.append(prompt)
-        return subprocess.call(command, pass_fds=(descriptor,),
-                               env=dict(os.environ, IMPLEMENT_SPEC_LAUNCH="1"))
+        result = subprocess.call(command, env=dict(
+            os.environ, IMPLEMENT_SPEC_LAUNCH="1", IMPLEMENT_SPEC_CODEX=str(executable),
+            IMPLEMENT_SPEC_LAUNCH_ID=ownership["launch_id"],
+        ))
+        if result == 0:
+            while True:
+                try:
+                    entry.complete_release(repo, ownership["launch_id"])
+                    break
+                except LockContended:
+                    time.sleep(0.05)
+        return result
 
 
 def main():
@@ -1142,21 +1239,22 @@ def main():
         if arguments.action == "launch":
             return launch(repo, arguments.spec, arguments.branch, arguments.resume)
         if arguments.action == "prepare":
-            verify_checkout_entry(repo, arguments.spec)
-            verify_configuration()
-            print(choose_branch(repo, arguments.spec, arguments.branch))
+            with exclusive(git_home(repo) / "entry-state.lock"), exclusive(git_home(repo) / "state.lock"):
+                verify_checkout_entry(repo, arguments.spec)
+                verify_configuration()
+                print(choose_branch(repo, arguments.spec, arguments.branch))
             return 0
         run = Run(repo, arguments.spec)
         if arguments.action in {"status", "snapshot"}:
             value = snapshot(repo, [run.record]) if arguments.action == "snapshot" else run.data
             print(json.dumps(value, indent=2))
             return 0
-        verify_checkout_entry(repo, arguments.spec)
-        with exclusive(git_home(repo) / "state.lock"):
+        with exclusive(git_home(repo) / "entry-state.lock"), exclusive(git_home(repo) / "state.lock"):
+            verify_checkout_entry(repo, arguments.spec)
             run = Run(repo, arguments.spec)
-            report = json.loads(Path(arguments.report).read_text()) if arguments.report else None
+            report = json.loads(Path(arguments.report).read_text(encoding="utf-8")) if arguments.report else None
             if arguments.action == "init":
-                run.create(json.loads(Path(arguments.plan).read_text()))
+                run.create(json.loads(Path(arguments.plan).read_text(encoding="utf-8")))
             elif arguments.action == "begin":
                 run.begin(arguments.ticket)
             elif arguments.action == "implemented":
@@ -1185,7 +1283,8 @@ def main():
                 run.checkpoint(arguments.implementer)
             print(json.dumps(run.data, indent=2))
         return 0
-    except (WorkflowError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+    except (WorkflowError, platform_support.LockError, platform_support.ExecutableError,
+            OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         return 2
 
