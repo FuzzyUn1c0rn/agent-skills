@@ -47,6 +47,7 @@ def require_inactive(report):
 
 def hold(repo, spec, branch=None, resume=False):
     workflow.verify_configuration()
+    executable = platform_support.resolve_codex()
     owner = session_id()
     workflow.relative_file(repo, spec)
     with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
@@ -55,7 +56,8 @@ def hold(repo, spec, branch=None, resume=False):
         entry = {
             "mode": "current", "phase": "preflight", "outer_session": owner,
             "spec": spec, "requested_branch": branch, "resume": resume,
-            "started": time.time(), "runtime": workflow.runtime_version(),
+            "started": time.time(), "runtime": workflow.runtime_version(executable),
+            "codex_executable": str(executable),
             "config_fingerprint": workflow.config_fingerprint(),
         }
         workflow.write_json(entry_path(repo), entry)
@@ -72,7 +74,7 @@ def admit(repo, spec, report=None):
     with workflow.exclusive(workflow.git_home(repo) / "entry-state.lock"):
         entry = owned_entry(repo, spec)
         workflow.verify_configuration()
-        if (entry["runtime"] != workflow.runtime_version()
+        if (entry["runtime"] != workflow.runtime_version(entry["codex_executable"])
                 or entry["config_fingerprint"] != workflow.config_fingerprint()):
             raise workflow.WorkflowError("Runtime or settings changed during admission. Stop and start again.")
         if entry["phase"] == "admitted":
@@ -188,7 +190,8 @@ def main():
         else:
             recover(repo, spec, report)
         return 0
-    except (workflow.WorkflowError, platform_support.LockError, OSError, ValueError, KeyError, TypeError,
+    except (workflow.WorkflowError, platform_support.LockError, platform_support.ExecutableError,
+            OSError, ValueError, KeyError, TypeError,
             subprocess.CalledProcessError) as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         return 2

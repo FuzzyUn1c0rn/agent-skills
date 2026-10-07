@@ -20,6 +20,21 @@ import platform_support
 
 
 class EntryTests(unittest.TestCase):
+    def test_current_entry_records_the_selected_absolute_executable(self):
+        _, started = self.start()
+        self.assertEqual(str(Path(sys.executable).resolve()), started["codex_executable"])
+
+    def test_admission_and_guard_retain_the_entry_executable_after_override_changes(self):
+        self.start()
+        self.env["IMPLEMENT_SPEC_CODEX"] = str(self.root / "missing-codex")
+        admitted = self.command_result("admit")
+        self.assertEqual(0, admitted.returncode, admitted.stderr)
+        self.assertEqual(str(Path(sys.executable).resolve()), json.loads(admitted.stdout)["codex_executable"])
+        guarded = self.guard_result()
+        self.assertEqual(2, guarded.returncode)
+        self.assertIn("missing-plan", guarded.stderr)
+        self.assertNotIn("Codex executable", guarded.stderr)
+
     def test_lock_backend_failure_cannot_authorize_admission_or_state_mutation(self):
         import portalocker
 
@@ -53,15 +68,8 @@ class EntryTests(unittest.TestCase):
         tdd.write_text("TDD fixture")
         source = Path(__file__).resolve().parents[1]
         install.install(source, self.skill, self.home)
-        binary = self.root / "bin"
-        binary.mkdir()
-        codex = binary / "codex"
-        codex.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
-                         'echo "codex-cli fixture"\nelse\n'
-                         'echo "UNEXPECTED_CODEX_LAUNCH" >&2\nexit 99\nfi\n')
-        codex.chmod(0o755)
         self.env = dict(os.environ, CODEX_HOME=str(self.home),
-                        CODEX_THREAD_ID="selected-outer", PATH=str(binary) + os.pathsep + os.environ["PATH"])
+                        CODEX_THREAD_ID="selected-outer", IMPLEMENT_SPEC_CODEX=sys.executable)
         self.harness = str(Path(__file__).with_name("helper_harness.py"))
         self.command = [sys.executable, self.harness, str(self.skill / "scripts/entry.py")]
         self.workflow_command = [sys.executable, self.harness, str(self.skill / "scripts/workflow.py")]
@@ -211,22 +219,19 @@ class EntryTests(unittest.TestCase):
         self.assertIn("admission", result.stderr)
 
     def test_new_session_uses_configured_launcher_and_marks_the_attached_outer(self):
-        binary = self.root / "bin/codex"
         capture = self.root / "launch.json"
-        binary.write_text(
-            f"#!{sys.executable}\nimport json, os, sys\n"
-            "if sys.argv[1:] == ['--version']:\n    print('codex-cli fixture')\n"
-            f"else:\n    open({str(capture)!r}, 'w').write(json.dumps("
-            "{'arguments': sys.argv[1:], 'attached': os.environ.get('IMPLEMENT_SPEC_LAUNCH')}))\n"
-        )
-        binary.chmod(0o755)
+        version_capture = self.root / "version.json"
+        self.env.update(IMPLEMENT_SPEC_TEST_LAUNCH_CAPTURE=str(capture),
+                        IMPLEMENT_SPEC_TEST_VERSION_CAPTURE=str(version_capture))
         (self.skill / "references/runtime-evidence.json").unlink(missing_ok=True)
         result = subprocess.run(
-            [sys.executable, str(self.skill / "scripts/entry.py"), "start", "PRD.md", "--repo", str(self.repo), "--session", "new"],
+            self.command + ["start", "PRD.md", "--repo", str(self.repo), "--session", "new"],
             env=self.env, capture_output=True, text=True, timeout=5,
         )
         self.assertEqual(0, result.returncode, result.stderr)
         launched = json.loads(capture.read_text())
+        self.assertEqual(str(Path(sys.executable).resolve()), launched["executable"])
+        self.assertEqual([launched["executable"], "--version"], json.loads(version_capture.read_text()))
         selected = configuration.load()["launcher"]
         self.assertIn("model=" + json.dumps(selected["model"]), launched["arguments"])
         self.assertIn("model_reasoning_effort=" + json.dumps(selected["effort"]), launched["arguments"])
@@ -248,6 +253,7 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual("codex-cli fixture", report["runtime"])
+        self.assertEqual(str(Path(sys.executable).resolve()), report["codex_executable"])
         self.assertEqual({"installed_models": True}, report["checks"])
         self.assertFalse((self.home / "sessions").exists())
 

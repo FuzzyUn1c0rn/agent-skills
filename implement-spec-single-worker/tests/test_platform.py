@@ -1,6 +1,8 @@
 import os
+import errno
 from pathlib import Path
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,6 +17,102 @@ sys.path.insert(0, str(SCRIPTS))
 HELPER_ENV = dict(os.environ, PYTHONPATH=os.pathsep.join(
     part for part in (str(SCRIPTS), os.environ.get("PYTHONPATH")) if part
 ))
+
+
+class ExecutableTests(unittest.TestCase):
+    def test_path_resolution_accepts_a_native_binary_in_a_directory_with_spaces_and_unicode(self):
+        from platform_support import resolve_codex
+
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory) / "native tools Ω"
+            folder.mkdir()
+            binary = folder / ("codex.exe" if os.name == "nt" else "codex")
+            shutil.copy2(sys.executable, binary)
+            with patch.dict(os.environ, {"PATH": str(folder)}):
+                os.environ.pop("IMPLEMENT_SPEC_CODEX", None)
+                self.assertEqual(binary.resolve(), resolve_codex())
+
+    def test_selected_path_wrapper_is_not_skipped_for_a_later_native_installation(self):
+        from platform_support import ExecutableError, resolve_codex
+
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first"
+            later = Path(directory) / "later"
+            first.mkdir()
+            later.mkdir()
+            wrapper = first / ("codex.cmd" if os.name == "nt" else "codex")
+            wrapper.write_bytes(b"#!/bin/sh\necho unsupported\n")
+            wrapper.chmod(0o755)
+            shutil.copy2(sys.executable, later / ("codex.exe" if os.name == "nt" else "codex"))
+            with patch.dict(os.environ, {"PATH": str(first) + os.pathsep + str(later)}):
+                os.environ.pop("IMPLEMENT_SPEC_CODEX", None)
+                with self.assertRaises(ExecutableError) as rejected:
+                    resolve_codex()
+                self.assertIn(str(wrapper.resolve()), str(rejected.exception))
+
+    def test_symlink_to_a_native_binary_resolves_to_the_executable(self):
+        from platform_support import resolve_codex
+
+        with tempfile.TemporaryDirectory() as directory:
+            link = Path(directory) / ("codex.exe" if os.name == "nt" else "codex")
+            try:
+                link.symlink_to(sys.executable)
+            except OSError as error:
+                if getattr(error, "winerror", None) == 1314 or error.errno in {errno.EPERM, errno.ENOSYS, errno.EOPNOTSUPP}:
+                    self.skipTest(f"Symlink creation unavailable: {error}")
+                raise
+            with patch.dict(os.environ, {"IMPLEMENT_SPEC_CODEX": str(link)}):
+                self.assertEqual(Path(sys.executable).resolve(), resolve_codex())
+
+    def test_invalid_overrides_are_paths_not_shell_commands_or_fallback_requests(self):
+        from platform_support import ExecutableError, resolve_codex
+
+        with tempfile.TemporaryDirectory() as directory:
+            for selected in ("", str(Path(directory) / "absent"), directory, sys.executable + " --version"):
+                with self.subTest(selection=selected), patch.dict(os.environ, {"IMPLEMENT_SPEC_CODEX": selected}):
+                    with self.assertRaises(ExecutableError) as rejected:
+                        resolve_codex()
+                    self.assertIn("IMPLEMENT_SPEC_CODEX", str(rejected.exception))
+
+    def test_missing_path_selection_has_installation_override_guidance(self):
+        from platform_support import ExecutableError, resolve_codex
+
+        with patch.dict(os.environ, {"PATH": ""}):
+            os.environ.pop("IMPLEMENT_SPEC_CODEX", None)
+            with self.assertRaises(ExecutableError) as rejected:
+                resolve_codex()
+            self.assertIn("IMPLEMENT_SPEC_CODEX", str(rejected.exception))
+
+    @unittest.skipIf(os.name == "nt", "Windows chmod does not control executable permission")
+    def test_nonexecutable_native_file_is_rejected(self):
+        from platform_support import ExecutableError, resolve_codex
+
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / "codex"
+            shutil.copy2(sys.executable, binary)
+            binary.chmod(0o644)
+            with patch.dict(os.environ, {"IMPLEMENT_SPEC_CODEX": str(binary)}):
+                with self.assertRaises(ExecutableError):
+                    resolve_codex()
+
+    def test_selected_script_wrapper_is_rejected_with_override_guidance(self):
+        from platform_support import ExecutableError, resolve_codex
+
+        with tempfile.TemporaryDirectory() as directory:
+            wrapper = Path(directory) / ("codex.exe" if os.name == "nt" else "codex")
+            wrapper.write_bytes(b"#!/usr/bin/env python3\nprint('wrapper')\n")
+            wrapper.chmod(0o755)
+            with patch.dict(os.environ, {"IMPLEMENT_SPEC_CODEX": str(wrapper)}):
+                with self.assertRaises(ExecutableError) as rejected:
+                    resolve_codex()
+            self.assertIn("unsupported", str(rejected.exception).lower())
+            self.assertIn("IMPLEMENT_SPEC_CODEX", str(rejected.exception))
+
+    def test_explicit_native_executable_overrides_path_and_resolves_absolute_path(self):
+        from platform_support import resolve_codex
+
+        with patch.dict(os.environ, {"IMPLEMENT_SPEC_CODEX": sys.executable, "PATH": ""}):
+            self.assertEqual(Path(sys.executable).resolve(), resolve_codex())
 
 
 class LockTests(unittest.TestCase):

@@ -1,5 +1,7 @@
-"""Portable checkout locking; workflow ownership stays in the entry helpers."""
+"""Portable locking and native executable selection for the workflow helpers."""
 
+import os
+import shutil
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -31,6 +33,41 @@ class LockError(RuntimeError):
 
 class LockContended(LockError):
     """Another operation holds the requested exclusive lock."""
+
+
+class ExecutableError(RuntimeError):
+    """The selected Codex executable cannot be used natively."""
+
+
+def resolve_codex():
+    """Select one native executable path, without interpreting shell commands."""
+    selected = os.environ.get("IMPLEMENT_SPEC_CODEX")
+    if selected is None:
+        selected = shutil.which("codex")
+    guidance = "Set IMPLEMENT_SPEC_CODEX to one native Codex executable path (without arguments)."
+    if not selected:
+        raise ExecutableError(f"No Codex executable selected on PATH or in IMPLEMENT_SPEC_CODEX. {guidance}")
+    try:
+        path = Path(selected).resolve(strict=True)
+    except (OSError, ValueError) as error:
+        raise ExecutableError(f"Invalid Codex executable {selected!r}: {error}. {guidance}") from error
+    if not path.is_file() or not os.access(path, os.X_OK):
+        raise ExecutableError(f"Codex selection is not an executable file: {path}. {guidance}")
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(64)
+            if os.name == "nt":
+                native = len(header) == 64 and header[:2] == b"MZ"
+                if native:
+                    stream.seek(int.from_bytes(header[60:64], "little"))
+                    native = stream.read(4) == b"PE\0\0"
+            else:
+                native = header[:4] == b"\x7fELF"
+    except OSError as error:
+        raise ExecutableError(f"Cannot read Codex executable {path}: {error}. {guidance}") from error
+    if not native:
+        raise ExecutableError(f"Unsupported Codex executable or script wrapper: {path}. {guidance}")
+    return path
 
 
 @contextmanager
