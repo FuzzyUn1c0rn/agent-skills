@@ -9,14 +9,14 @@ import unittest
 import datetime
 from unittest.mock import patch
 
-from test_entry import EntryTests
+import test_entry
 import workflow
 
 
 class LifecycleTests(unittest.TestCase):
-    setUp = EntryTests.setUp
-    command_result = EntryTests.command_result
-    guard_result = EntryTests.guard_result
+    setUp = test_entry.EntryTests.setUp
+    command_result = test_entry.EntryTests.command_result
+    guard_result = test_entry.EntryTests.guard_result
 
     def wait_file(self, path):
         deadline = time.monotonic() + 15
