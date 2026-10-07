@@ -1023,8 +1023,9 @@ def validate_coordinator(identifier, entry):
         raise WorkflowError("Only a fresh named coordinator belonging to the admitted owner may mutate the run.")
 
 
-def runtime_version():
-    result = subprocess.run(["codex", "--version"], check=True, capture_output=True, text=True)
+def runtime_version(executable=None):
+    executable = executable if executable is not None else platform_support.resolve_codex()
+    result = subprocess.run([str(executable), "--version"], check=True, capture_output=True, text=True)
     return result.stdout.strip()
 
 
@@ -1043,8 +1044,10 @@ def enforced_config_arguments(include_outer_model=True):
 
 def configuration_status():
     verify_configuration()
+    executable = platform_support.resolve_codex()
     return {
-        "runtime": runtime_version(),
+        "runtime": runtime_version(executable),
+        "codex_executable": str(executable),
         "config_fingerprint": config_fingerprint(),
         "checks": {"installed_models": True},
         "scope": "Local configuration only. No agents or model calls are started.",
@@ -1066,7 +1069,7 @@ def verify_checkout_entry(repo, spec):
         if (entry.get("phase") != "admitted" or entry.get("release")
                 or entry.get("spec") != spec
                 or entry.get("branch") != git(repo, "branch", "--show-current")
-                or entry.get("runtime") != runtime_version()
+                or entry.get("runtime") != runtime_version(entry["codex_executable"])
                 or entry.get("config_fingerprint") != config_fingerprint()):
             raise WorkflowError("Current-session admission is missing or stale. Stop before ticket work.")
         verify_configuration()
@@ -1083,13 +1086,16 @@ def verify_checkout_entry(repo, spec):
 
 def launch(repo, spec, branch=None, resume=False):
     verify_configuration()
+    executable = platform_support.resolve_codex()
+    version = runtime_version(executable)
     with exclusive(git_home(repo) / "launch.lock") as descriptor:
         if (git_home(repo) / "entry.json").exists():
             raise WorkflowError("An interrupted current-session entry needs entry.py recover before launching.")
-        command = ["codex", "--no-daemon", "--profile", "implement-spec", "--approve-for-me", "-C", str(repo)]
+        command = [str(executable), "--no-daemon", "--profile", "implement-spec", "--approve-for-me", "-C", str(repo)]
         command.extend(enforced_config_arguments())
         attached = ("You are already the outer session opened by the dedicated launcher. "
                     "The parent holds the checkout lock; IMPLEMENT_SPEC_LAUNCH=1. "
+                    f"Codex executable: {executable}; version: {version}. "
                     "Do not run entry.py start or launch another outer. ")
         if resume:
             if branch and branch != git(repo, "branch", "--show-current"):
@@ -1114,7 +1120,7 @@ def launch(repo, spec, branch=None, resume=False):
             prompt = attached + "Use $implement-spec-single-worker to execute the approved AFK workflow. Read the skill before acting. " + json.dumps({"spec": spec, "branch": selected})
             command.append(prompt)
         return subprocess.call(command, pass_fds=(descriptor,),
-                               env=dict(os.environ, IMPLEMENT_SPEC_LAUNCH="1"))
+                               env=dict(os.environ, IMPLEMENT_SPEC_LAUNCH="1", IMPLEMENT_SPEC_CODEX=str(executable)))
 
 
 def main():
@@ -1186,7 +1192,8 @@ def main():
                 run.checkpoint(arguments.implementer)
             print(json.dumps(run.data, indent=2))
         return 0
-    except (WorkflowError, platform_support.LockError, OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+    except (WorkflowError, platform_support.LockError, platform_support.ExecutableError,
+            OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"BLOCKED: {error}", file=sys.stderr)
         return 2
 

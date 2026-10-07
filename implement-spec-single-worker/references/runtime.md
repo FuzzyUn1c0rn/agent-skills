@@ -59,6 +59,35 @@ Make these changes between runs, not while workers are active.
 and reports the CLI version. It does not start agents or make model calls.
 Passing it is a local configuration check, not a guarantee of agent behavior.
 
+## Codex executable
+
+Helpers select the native `codex` executable from PATH. To select another
+installation, set `IMPLEMENT_SPEC_CODEX` to one executable path, for example:
+
+```powershell
+$env:IMPLEMENT_SPEC_CODEX = 'C:\tools\codex.exe'
+```
+
+```sh
+export IMPLEMENT_SPEC_CODEX='/home/user/native tools/codex'
+```
+
+Use the actual native executable, including a symlink to it. The value is a
+path without arguments or surrounding shell quotes. Script wrappers such as npm
+`.cmd` shims, shell scripts and PowerShell functions are unsupported. If PATH
+selects a wrapper, the helper reports that selection and asks for the explicit
+native path; it does not search past the wrapper for another installation.
+No personal shell configuration change is required.
+
+Each entry or dedicated launch resolves once and uses the same absolute path for
+version checks and execution. Current-session ownership records that path, and
+admission and guarded operations retain it even if PATH or the override changes.
+`workflow.py doctor` reports its selected path and version. Finish or recover a
+run before changing its executable; upgrading the executable at its recorded
+path still invalidates admission if the version changes.
+
+## Native agent tools
+
 The invoking session must have tools that support the configured named roles
 and coordinator-to-worker nesting. Use those tools for actual work. If a
 required tool is absent or a real spawn fails, report the actual error and
