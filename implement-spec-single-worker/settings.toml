@@ -7,7 +7,7 @@ effort = "high"
 
 [roles.implementation_coordinator]
 model = "gpt-6-luna"
-effort = "medium"
+effort = "high"
 
 [roles.ticket_implementer]
 model = "gpt-6.1-sol"
