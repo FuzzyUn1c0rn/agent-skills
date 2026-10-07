@@ -1,23 +1,30 @@
 ---
 name: implement-spec-single-worker
-description: Execute an approved AFK PRD sequentially with TDD implementers, independent verification, local commits and bounded repairs after specification audits.
+description: Execute an approved specification and AFK tickets from the repository's issue tracker sequentially with TDD, independent verification, local commits and bounded audit repairs.
 ---
 
 # Sequential implementation
 
 Use this skill when the user explicitly requests implementation of an approved
-PRD and its AFK tickets. Designing or editing this framework does not authorize
-executing repository tickets.
+specification and its AFK tickets. Designing or editing this framework does not
+authorize executing repository tickets.
 
 ## Start
 
 The user invokes the skill, not a Python command:
 
 ```text
-$implement-spec-single-worker path/to/PRD.md
-$implement-spec-single-worker path/to/PRD.md session=new branch=feature/name
-$implement-spec-single-worker path/to/PRD.md resume
+$implement-spec-single-worker <spec-reference>
+$implement-spec-single-worker <spec-reference> session=new branch=feature/name
+$implement-spec-single-worker <spec-reference> resume
 ```
+
+`<spec-reference>` identifies the specification or Wayfinder map in the
+repository's configured issue tracker. Read applicable repository instructions and
+`docs/agents/issue-tracker.md` before fetching the specification or tickets.
+Use its configured tools and conventions for the parent artifact, related tickets
+and dependencies. Read [sources.md](references/sources.md) to resolve canonical
+references, capture approved requirements and confirm tracker completion.
 
 Read [entry.md](references/entry.md) before starting or recovering a run.
 Resolve `session` from the invocation, then `default_session` in
@@ -60,7 +67,7 @@ completed commits and blockers here so the user can follow the work.
    and [commands.md](references/commands.md) for guard commands and the plan format.
 2. Perform preflight against the selected branch. Read applicable repository
    instructions and all required tickets. Resolve the entire dependency graph,
-   required checks, completion labels and approved testing boundaries. Missing
+   required checks, tracker completion operations and approved testing boundaries. Missing
    significant decisions or required authorization stop the run.
 3. Write the preflight plan outside the checkout and initialize the run using
    the guard. For a resume, reconcile the saved state and old agent lifecycle
@@ -69,7 +76,8 @@ completed commits and blockers here so the user can follow the work.
    no model or effort override or full-history fork. In both entry modes,
    first ask it to return `COORDINATOR_READY` without starting work. Wait for that response, register
    its ID using `entry.py coordinator SPEC --agent ID`, then send the plan with
-   `send_input`. Supply the PRD and saved run record paths.
+   `send_input`. Supply the canonical specification/ticket references, captured
+   requirements and saved execution record.
    Wait while it processes tickets. The outer agent does not modify project
    files or start another worker while the coordinator or a worker is executing.
 5. Adjudicate repeated or disputed blocking findings once per ticket, using
@@ -79,10 +87,11 @@ completed commits and blockers here so the user can follow the work.
    and further unresolved disagreement return to the user.
 6. After all required ticket commits exist, close the coordinator and release its
    registration through `entry.py release-coordinator` in either entry mode. Spawn one
-   native `spec_auditor` with the complete PRD, ticket set, baseline, commit list,
+   native `spec_auditor` with the complete specification, ticket set, baseline, commit list,
    repository rules, prior audits and verification evidence.
 7. Close the auditor and save its report with `finish`. A complete PASS finishes
-   the PRD. Otherwise follow [audit repairs](references/audit-repairs.md): assess
+   the implementation audit; publish and confirm specification completion using
+   [sources.md](references/sources.md). Otherwise follow [audit repairs](references/audit-repairs.md): assess
    every finding, reopen deficient tickets or create linked repair tickets, and
    hand the saved plan to a fresh coordinator using step 4. Repeat the whole-spec
    audit after repairs. At the allowance limit, save the remaining work and return
@@ -91,8 +100,8 @@ completed commits and blockers here so the user can follow the work.
 
 ## Coordinator
 
-Read [workflow.md](references/workflow.md), [commands.md](references/commands.md)
-and [results.md](references/results.md).
+Read [workflow.md](references/workflow.md), [commands.md](references/commands.md),
+[sources.md](references/sources.md) and [results.md](references/results.md).
 
 Follow the saved plan. One unfinished ticket and one child at a time. Run the
 guard's `begin` before a new implementation attempt. Spawn `ticket_implementer`
@@ -130,8 +139,11 @@ control unrelated agents or software. The user must keep the checkout exclusive.
 
 Implementers use the existing TDD skill directly at approved boundaries.
 They do not use `/implement`, delegate, commit or close tickets. Verifiers and
-auditors leave source and tracker files unchanged. The coordinator owns ticket
-commits; the outer agent owns the final report and PRD status commit.
+auditors leave implementation and tracker artifacts unchanged. The coordinator owns ticket
+commits and ticket synchronization; the outer agent owns the final report,
+specification completion and its evidence commit. The guards commit implementation
+and execution evidence; agents update actual tracker artifacts and record
+confirmation using [sources.md](references/sources.md).
 
 Run ordinary local implementation and offline checks autonomously. Live tests,
 migrations and external-service writes require explicit run-level authorization.

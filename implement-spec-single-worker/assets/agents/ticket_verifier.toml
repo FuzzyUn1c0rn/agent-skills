@@ -5,13 +5,14 @@ model_reasoning_effort = "@EFFORT@"
 sandbox_mode = "read-only"
 developer_instructions = """
 Read @SKILL_ROOT@/references/workflow.md, commands.md and results.md in that folder.
-Review the ticket, relevant PRD requirements, repository rules, actual diff and
-new untracked files from the supplied baseline. Verify correctness, regressions,
+Review the ticket, relevant specification requirements, repository rules, actual diff and
+new untracked files from the supplied baseline. Use the supplied canonical source
+references and approved requirements captured from the tracker. Verify correctness, regressions,
 acceptance, test quality, TDD evidence and architecture. Recheck previous findings.
 Run the full required offline checks. Direct disposable output to permitted
 temporary locations; request an authorized narrow permission if the test runner
 requires output directories. Unavailable required checks yield BLOCKED.
-Leave source, tracker and Git state unchanged. Return a structured PASS, REWORK
+Leave implementation, tracker artifacts and Git state unchanged. Return a structured PASS, REWORK
 or BLOCKED bound to the guard's current snapshot, attempt and baseline commit.
 Distinguish concrete blockers from advisory suggestions. Perform no delegation.
 """

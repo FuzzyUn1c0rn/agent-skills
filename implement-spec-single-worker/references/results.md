@@ -1,6 +1,9 @@
 # Worker results
 
-Use these fields for handoffs. Paths are relative to the repository root.
+Use these fields for handoffs. `ticket` is the canonical tracker reference.
+Supply the actual specification/ticket references, approved bodies and discussion
+using [sources.md](sources.md). Only code changes and report destinations use
+filesystem paths.
 Reference actual command results; do not fabricate test runs.
 
 ## Implementer
@@ -8,7 +11,7 @@ Reference actual command results; do not fabricate test runs.
 ```json
 {
   "outcome": "READY_FOR_REVIEW",
-  "ticket": "path/to/ticket.md",
+  "ticket": "canonical-ticket-reference",
   "attempt": 1,
   "changed_paths": ["src/example.py", "test/test_example.py"],
   "tdd": [
@@ -38,7 +41,7 @@ proof that newly changed code passes; repairs still require observed TDD evidenc
 ```json
 {
   "verdict": "PASS",
-  "ticket": "path/to/ticket.md",
+  "ticket": "canonical-ticket-reference",
   "attempt": 1,
   "base_commit": "full starting SHA",
   "reviewed_snapshot": "fingerprint of the reviewed working tree",
@@ -69,7 +72,7 @@ that were not disputed. Keep the original verifier report intact.
 
 ```json
 {
-  "ticket": "path/to/ticket.md",
+  "ticket": "canonical-ticket-reference",
   "attempt": 2,
   "reviewed_snapshot": "fingerprint of the unchanged working tree",
   "previous_workers_inactive": true,
@@ -79,7 +82,7 @@ that were not disputed. Keep the original verifier report intact.
     {
       "id": "F1",
       "classification": "advisory",
-      "reference": "path/to/ticket.md#AC1 and applicable repository guidance",
+      "reference": "canonical-ticket-reference#AC1 and applicable repository guidance",
       "evidence": "The required behavior and checks pass; the finding requests an optional naming change."
     }
   ]
@@ -95,13 +98,13 @@ to the user. Cite actual evidence, not the illustrative explanation above.
 ## Final auditor
 
 Use the verifier structure with `audited_commit`, `baseline_commit` and
-`requirements` covering the whole PRD in place of the ticket-specific fields.
+`requirements` covering the whole specification in place of the ticket-specific fields.
 Identify evidence reused from earlier verification and why it remains valid.
 Unavailable required checks prevent `PASS`. The outer agent saves the report
-and owns any status edits and local commit.
+and owns specification completion through the configured tracker and its evidence commit.
 
 On subsequent audits, inspect prior findings, the outer's dispositions and all
-repair commits while reviewing the whole PRD from the original baseline. Use
+repair commits while reviewing the whole specification from the original baseline. Use
 the same finding ID when the underlying defect persists. The outer plans repairs
 through [audit-repairs.md](audit-repairs.md); the auditor remains independent and
-leaves source and ticket files unchanged.
+leaves implementation and tracker artifacts unchanged.

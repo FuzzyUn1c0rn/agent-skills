@@ -98,7 +98,7 @@ class LifecycleTests(unittest.TestCase):
         self.addCleanup(lambda: (pause / "resume").touch())
         plan = self.root / "plan.json"
         plan.write_text(json.dumps({
-            "spec": "PRD.md", "checks": [["suite"]], "requirements": ["US1"],
+            "spec": "PRD.md", "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "requirements": ["US1"],
             "approval_evidence": "Approved fixture", "tickets": [
                 {"path": "ticket.md", "execution": "AFK", "kind": "documentation", "criteria": ["AC1"]},
             ],
@@ -237,7 +237,7 @@ class LifecycleTests(unittest.TestCase):
         workflow.choose_branch(self.repo, "PRD.md", "saved-feature")
         with patch.dict(os.environ, {"CODEX_THREAD_ID": "dedicated-outer"}):
             run = workflow.Run(self.repo, "PRD.md")
-            run.create({"spec": "PRD.md", "checks": [["suite"]], "requirements": ["US1"],
+            run.create({"spec": "PRD.md", "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "requirements": ["US1"],
                         "approval_evidence": "Approved fixture", "tickets": [
                             {"path": "ticket.md", "execution": "AFK", "criteria": ["AC1"], "seams": ["public"]},
                         ]})

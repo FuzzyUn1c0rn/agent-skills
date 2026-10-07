@@ -237,7 +237,7 @@ class EntryUtf8Tests(unittest.TestCase):
         self.assertEqual(0, admitted.returncode, admitted.stderr)
         plan = self.root / "plan.json"
         plan.write_bytes(json.dumps({
-            "spec": "PRD.md", "checks": [["suite"]], "requirements": ["US1"],
+            "spec": "PRD.md", "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "requirements": ["US1"],
             "approval_evidence": "東京 🚀 approved requirements and seams.",
             "tickets": [{"path": "ticket.md", "execution": "AFK", "criteria": ["AC1"], "seams": ["public"]}],
         }, ensure_ascii=False).encode("utf-8"))

@@ -58,7 +58,7 @@ def git_paths(repo, *arguments):
 
 
 def choose_branch(repo, spec, requested=None):
-    spec = repository_path(spec)
+    spec = tracker_reference(spec)
     current = git(repo, "branch", "--show-current")
     if not current:
         raise WorkflowError("Detached HEAD: select a branch before starting.")
@@ -122,7 +122,7 @@ def snapshot(repo, excluded=(), include_index=True):
 def validate_pass(report, ticket, checks, fingerprint, finding_ids=()):
     if report.get("verdict") != "PASS":
         raise WorkflowError("Verification did not pass.")
-    if (repository_path(report.get("ticket")) != repository_path(ticket["path"])
+    if (tracker_reference(report.get("ticket")) != tracker_reference(ticket_reference(ticket))
             or report.get("reviewed_snapshot") != fingerprint):
         raise WorkflowError("Verification does not match this ticket and working tree.")
     if report.get("blocking_findings") != [] or report.get("unavailable_checks") != []:
@@ -180,19 +180,33 @@ def repository_path(name):
     return path.as_posix()
 
 
+def tracker_reference(value):
+    """Keep tracker identities opaque; normalize only local-style references."""
+    if not isinstance(value, str) or not value.strip() or any(c in value for c in "\0\r\n"):
+        raise WorkflowError("Expected a nonempty specification or ticket reference.")
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]{1,}:", value):
+        return value
+    return repository_path(value)
+
+
+def ticket_reference(ticket):
+    return ticket["ref"] if "ref" in ticket else ticket["path"]
+
+
 def ticket_paths(ticket):
     ticket = copy.deepcopy(ticket)
-    ticket["path"] = repository_path(ticket["path"])
+    key = "ref" if "ref" in ticket else "path"
+    ticket[key] = tracker_reference(ticket[key])
     for field in ("blocked_by", "related_tickets"):
         if field in ticket:
-            ticket[field] = [repository_path(name) for name in ticket[field]]
+            ticket[field] = [tracker_reference(name) for name in ticket[field]]
     return ticket
 
 
 def report_paths(report):
     report = copy.deepcopy(report)
     if "ticket" in report:
-        report["ticket"] = repository_path(report["ticket"])
+        report["ticket"] = tracker_reference(report["ticket"])
     if "tickets" in report:
         report["tickets"] = [ticket_paths(ticket) for ticket in report["tickets"]]
     return report
@@ -224,21 +238,21 @@ def status_text(path):
 def set_status(path, label):
     status_text(path)
     if not label or "\n" in label or "\r" in label:
-        raise WorkflowError("Invalid tracker label.")
+        raise WorkflowError("Invalid local execution status.")
     path.write_bytes(re.sub(rb"^Status: [^\r\n]+", lambda match: f"Status: {label}".encode("utf-8"),
                            path.read_bytes(), count=1, flags=re.MULTILINE))
 
 
 def validate_graph(tickets):
-    paths = [ticket["path"] for ticket in tickets]
+    paths = [ticket_reference(ticket) for ticket in tickets]
     if not paths or len(paths) != len(set(paths)):
         raise WorkflowError("Plan needs a nonempty, unique required-ticket list.")
     remaining = set(paths)
     completed = set()
     while remaining:
         available = [
-            ticket["path"] for ticket in tickets
-            if ticket["path"] in remaining and set(ticket.get("blocked_by", [])) <= completed
+            ticket_reference(ticket) for ticket in tickets
+            if ticket_reference(ticket) in remaining and set(ticket.get("blocked_by", [])) <= completed
         ]
         if not available:
             raise WorkflowError("Missing dependency or dependency cycle.")
@@ -257,14 +271,14 @@ def audit_cycle(number, authorization, round_limit=None):
 class Run:
     def __init__(self, repo, spec):
         self.repo = Path(repo).resolve()
-        spec = repository_path(spec)
-        relative_file(self.repo, spec)
+        spec = tracker_reference(spec)
         self.spec = spec
         branch = git(self.repo, "branch", "--show-current")
         identity = hashlib.sha256((spec + "\0" + branch).encode()).hexdigest()[:20]
         self.path = git_home(self.repo) / "runs" / identity / "state.json"
-        self.record = (Path(spec).parent / "implementation-run.json").as_posix()
         self.data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else None
+        self.record = (f".implement-spec/{identity}/execution.json" if not self.data or self.data.get("version", 2) >= 3
+                       else (Path(spec).parent / "implementation-run.json").as_posix())
         if self.data:
             self.data.setdefault("audit_cycles", [
                 audit_cycle(1, self.data["plan"]["approval_evidence"]),
@@ -282,8 +296,24 @@ class Run:
 
     def create(self, plan):
         plan = copy.deepcopy(plan)
-        plan["spec"] = repository_path(plan.get("spec"))
+        plan["spec"] = tracker_reference(plan.get("spec"))
         plan["tickets"] = [ticket_paths(ticket) for ticket in plan.get("tickets", [])]
+        tracker = plan.get("tracker")
+        if (not isinstance(tracker, dict) or not isinstance(tracker.get("kind"), str)
+                or not tracker["kind"].strip()):
+            raise WorkflowError("Record the repository's configured issue tracker before initializing a run.")
+        native = any("ref" in ticket for ticket in plan["tickets"])
+        if native:
+            if any("ref" not in ticket for ticket in plan["tickets"]):
+                raise WorkflowError("Tracker plans use canonical references for every ticket.")
+            if plan["tracker"]["kind"] != "local-markdown":
+                plan.setdefault("ready_ticket", "ready")
+                plan.setdefault("finished_ticket", "completed")
+                plan.setdefault("finished_spec", "completed")
+        else:
+            if tracker["kind"] != "local-markdown":
+                raise WorkflowError("Configured non-local trackers require ticket references, not artifact paths.")
+            self.record = (Path(self.spec).parent / "implementation-run.json").as_posix()
         if self.data is not None:
             raise WorkflowError("A run record already exists. Resume it instead of overwriting it.")
         entry_path = git_home(self.repo) / "entry.json"
@@ -301,7 +331,7 @@ class Run:
         if plan.get("spec") != self.spec or not plan.get("checks"):
             raise WorkflowError("The plan needs the matching spec and required offline checks.")
         if not plan.get("requirements"):
-            raise WorkflowError("The plan needs the PRD requirement identifiers.")
+            raise WorkflowError("The plan needs the specification requirement identifiers.")
         if any(not command or not isinstance(command, list)
                or any(not isinstance(part, str) or not part for part in command)
                for command in plan["checks"]):
@@ -310,28 +340,36 @@ class Run:
             raise WorkflowError("Record the evidence for approved requirements and testing boundaries.")
         if not git(self.repo, "branch", "--show-current"):
             raise WorkflowError("Detached HEAD is not supported.")
-        relative_file(self.repo, self.spec).read_text(encoding="utf-8")
+        local = not native or plan["tracker"]["kind"] == "local-markdown"
+        if local:
+            relative_file(self.repo, self.spec).read_text(encoding="utf-8")
+        elif (not isinstance(plan.get("specification"), dict)
+              or not plan["specification"].get("body") or not plan["specification"].get("revision")):
+            raise WorkflowError("Capture the approved specification body and source revision from the tracker.")
         tickets = plan.get("tickets", [])
         validate_graph(tickets)
         records = {}
         for ticket in tickets:
-            path = relative_file(self.repo, ticket["path"])
-            if ticket["path"] in {self.spec, self.record}:
-                raise WorkflowError("Ticket, specification and execution-record paths must differ.")
+            path = relative_file(self.repo, ticket_reference(ticket)) if local else None
+            if ticket_reference(ticket) in {self.spec, self.record}:
+                raise WorkflowError("Ticket, specification and execution-record identities must differ.")
             if ticket.get("execution") != "AFK" or not ticket.get("criteria"):
-                raise WorkflowError(f"Ticket is not fully specified for AFK: {ticket['path']}")
+                raise WorkflowError(f"Ticket is not fully specified for AFK: {ticket_reference(ticket)}")
             if ticket.get("kind", "behavior") == "behavior" and not ticket.get("seams"):
-                raise WorkflowError(f"Missing approved testing boundaries: {ticket['path']}")
-            label = status_text(path)
+                raise WorkflowError(f"Missing approved testing boundaries: {ticket_reference(ticket)}")
+            if not local and (not ticket.get("body") or not ticket.get("revision")):
+                raise WorkflowError("Capture each required ticket body and source revision from the tracker.")
+            label = status_text(path) if local else ticket.get("state")
             if label not in {plan.get("finished_ticket", "closed"), plan.get("ready_ticket", "ready-for-agent")}:
-                raise WorkflowError(f"Ticket is not ready or already finished: {ticket['path']}")
+                raise WorkflowError(f"Ticket is not ready or already finished: {ticket_reference(ticket)}")
             closed = label == plan.get("finished_ticket", "closed")
-            records[ticket["path"]] = {
+            records[ticket_reference(ticket)] = {
                 "attempts": 0, "commit": git(self.repo, "rev-parse", "HEAD") if closed else None,
-                "preexisting": closed, "findings": [], "implementer": None, "history": [],
+                "preexisting": closed, "status": label, "findings": [], "implementer": None, "history": [],
             }
         self.data = {
-            "version": 2, "repo": str(self.repo), "spec": self.spec,
+            "version": 3 if native else 2, "repo": str(self.repo), "spec": self.spec,
+            "record": self.record, "state_path": str(self.path),
             "branch": git(self.repo, "branch", "--show-current"),
             "baseline": git(self.repo, "rev-parse", "HEAD"),
             "head": git(self.repo, "rev-parse", "HEAD"),
@@ -341,6 +379,33 @@ class Run:
             "audits": [], "audit_cycles": [audit_cycle(1, plan["approval_evidence"])],
         }
         self.save()
+
+    def uses_local_tracker(self):
+        return (self.data.get("version", 2) < 3
+                or self.data["plan"]["tracker"]["kind"] == "local-markdown")
+
+    def artifact_status(self, ref):
+        if self.uses_local_tracker():
+            return status_text(relative_file(self.repo, ref))
+        if ref == self.spec:
+            return self.data.get("spec_status", "open")
+        return self.data["tickets"][ref].get("status", self.data["plan"]["ready_ticket"])
+
+    def set_artifact_status(self, ref, status):
+        if self.uses_local_tracker():
+            set_status(relative_file(self.repo, ref), status)
+        elif ref == self.spec:
+            self.data["spec_status"] = status
+        else:
+            self.data["tickets"][ref]["status"] = status
+
+    def require_publication(self):
+        if self.data.get("pending_publication"):
+            raise WorkflowError("Confirm the pending tracker publication before advancing.")
+
+    def queue_publication(self, ref, commit):
+        marker = hashlib.sha256((str(self.path) + "\0" + ref + "\0" + commit).encode()).hexdigest()[:24]
+        self.data["pending_publication"] = {"ref": ref, "commit": commit, "marker": marker}
 
     def save(self):
         self.data["checkpoint"] = snapshot(self.repo, [self.record])
@@ -378,7 +443,7 @@ class Run:
                 raise WorkflowError(f"Historical audit report changed or disappeared: {audit['path']}")
 
     def ticket(self):
-        return next(item for item in self.data["plan"]["tickets"] if item["path"] == self.data["current"])
+        return next(item for item in self.data["plan"]["tickets"] if ticket_reference(item) == self.data["current"])
 
     def require_outer(self):
         outer = self.data.get("outer_session")
@@ -392,7 +457,7 @@ class Run:
             raise WorkflowError("Audit handoff needs the current snapshot and evidence that all workers closed.")
 
     def attempts_remaining(self, requested):
-        requested = repository_path(requested)
+        requested = tracker_reference(requested)
         record = self.data["tickets"][requested]
         remaining = record.get("attempt_limit", 3) - record["attempts"]
         if record.get("audit_findings"):
@@ -404,11 +469,12 @@ class Run:
         return remaining
 
     def begin(self, requested):
-        requested = repository_path(requested)
+        requested = tracker_reference(requested)
         self.ensure({"ready", "rework"}, checkpoint=True)
+        self.require_publication()
         if self.data["current"] not in (None, requested):
             raise WorkflowError("Another ticket is unfinished.")
-        ticket = next((item for item in self.data["plan"]["tickets"] if item["path"] == requested), None)
+        ticket = next((item for item in self.data["plan"]["tickets"] if ticket_reference(item) == requested), None)
         if ticket is None or self.data["tickets"][requested]["commit"]:
             raise WorkflowError("Ticket is not unfinished work in this plan.")
         if any(not self.data["tickets"][dependency]["commit"] for dependency in ticket.get("blocked_by", [])):
@@ -453,13 +519,13 @@ class Run:
         report = report_paths(report)
         self.ensure({"implementing"})
         ticket = self.ticket()
-        attempt = self.data["tickets"][ticket["path"]]["attempts"]
-        if report.get("ticket") != ticket["path"] or report.get("attempt") != attempt:
+        attempt = self.data["tickets"][ticket_reference(ticket)]["attempts"]
+        if report.get("ticket") != ticket_reference(ticket) or report.get("attempt") != attempt:
             raise WorkflowError("Implementation result belongs to another ticket or attempt.")
         if report.get("outcome") != "READY_FOR_REVIEW":
-            self.data["tickets"][ticket["path"]]["history"][-1]["implementation"] = report
+            self.data["tickets"][ticket_reference(ticket)]["history"][-1]["implementation"] = report
             self.data.update(phase="blocked", blocker=report)
-            if self.attempts_remaining(ticket["path"]) <= 0:
+            if self.attempts_remaining(ticket_reference(ticket)) <= 0:
                 self.data.update(budget_exhausted="ticket_attempts", requires_user_resolution=True)
             self.save()
             return
@@ -479,7 +545,7 @@ class Run:
         elif not report.get("tdd_not_applicable_reason") or not report.get("checks"):
             raise WorkflowError("Nonbehavioral work requires its validation and TDD explanation.")
         self.data.update(phase="reviewing", implementation=report)
-        self.data["tickets"][ticket["path"]]["history"][-1]["implementation"] = report
+        self.data["tickets"][ticket_reference(ticket)]["history"][-1]["implementation"] = report
         self.save()
 
     def reviewed(self, report):
@@ -613,9 +679,8 @@ class Run:
                       snapshot(self.repo, [self.record]),
                       self.data["tickets"][self.data["current"]].get("audit_findings", []))
         ticket = self.data["current"]
-        path = relative_file(self.repo, ticket)
         transaction = {
-            "kind": "ticket", "path": ticket, "old_status": status_text(path),
+            "kind": "ticket", "path": ticket, "old_status": self.artifact_status(ticket),
             "new_status": self.data["plan"].get("finished_ticket", "closed"),
             "parent": self.data["head"], "message": f"Implement {Path(ticket).stem}",
             "before_status_snapshot": snapshot(self.repo, [self.record], include_index=False),
@@ -627,7 +692,7 @@ class Run:
         untracked = subprocess.check_output(
             ["git", "-C", str(self.repo), "ls-files", "--others", "--exclude-standard", "-z"]
         ).decode().split("\0")
-        transaction["paths"] = sorted((set(changed) | set(untracked) | {ticket, self.record}) - {""})
+        transaction["paths"] = sorted((set(changed) | set(untracked) | {self.record} | ({ticket} if self.uses_local_tracker() else set())) - {""})
         self.data.update(phase="committing", transaction=transaction)
         self.save()
         return self.reconcile_commit()
@@ -640,13 +705,13 @@ class Run:
             raise WorkflowError("Run belongs to another branch.")
         self.require_audit_integrity()
         current_head = git(self.repo, "rev-parse", "HEAD")
-        status_path = relative_file(self.repo, transaction["path"])
+        status_ref = transaction["path"]
         if current_head == transaction["parent"]:
-            label = status_text(status_path)
+            label = self.artifact_status(status_ref)
             if label not in {transaction["old_status"], transaction["new_status"]}:
                 raise WorkflowError("Pending transaction status was changed unexpectedly.")
             if label != transaction["old_status"]:
-                set_status(status_path, transaction["old_status"])
+                self.set_artifact_status(status_ref, transaction["old_status"])
             excluded = [self.record]
             if transaction["kind"] == "audit":
                 excluded.append(transaction["audit_path"])
@@ -658,19 +723,22 @@ class Run:
                 path = relative_file(self.repo, name)
                 current = path.read_bytes().decode("utf-8") if path.exists() else None
                 if current not in (edit["before"], edit["after"]):
-                    raise WorkflowError("Pending repair ticket changed; preserve it and investigate.")
+                    raise WorkflowError("Pending transaction file changed; preserve it and investigate.")
             for name, edit in edits.items():
                 path = relative_file(self.repo, name)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(edit["after"].encode("utf-8"))
             if transaction["kind"] == "audit":
                 audit_path = relative_file(self.repo, transaction["audit_path"])
-                content = "# Implementation audit\n\n```json\n" + json.dumps(self.data["audit"], indent=2) + "\n```\n"
+                content = json.dumps(self.data["audit"], indent=2) + "\n"
+                if self.data.get("version", 2) < 3:
+                    content = "# Implementation audit\n\n```json\n" + json.dumps(self.data["audit"], indent=2) + "\n```\n"
                 if audit_path.exists() and audit_path.read_bytes().decode("utf-8") != content:
                     raise WorkflowError("Pending audit report was changed; preserve it and investigate.")
                 if not audit_path.exists():
+                    audit_path.parent.mkdir(parents=True, exist_ok=True)
                     audit_path.write_bytes(content.encode("utf-8"))
-            set_status(status_path, transaction["new_status"])
+            self.set_artifact_status(status_ref, transaction["new_status"])
             transaction["status_restored"] = False
             transaction["working_snapshot"] = snapshot(self.repo, [self.record], include_index=False)
             self.save()
@@ -695,7 +763,7 @@ class Run:
                 git(self.repo, "commit", "-m", transaction["message"])
             except WorkflowError:
                 if git(self.repo, "rev-parse", "HEAD") == transaction["parent"]:
-                    set_status(status_path, transaction["old_status"])
+                    self.set_artifact_status(status_ref, transaction["old_status"])
                     transaction["status_restored"] = True
                     self.data["blocker"] = "Commit failed; fix its cause, then reconcile-commit."
                     self.save()
@@ -708,9 +776,9 @@ class Run:
                 or git(self.repo, "rev-parse", "HEAD^{tree}") != transaction.get("tree")
                 or dirty - {self.record}):
             if transaction["new_status"] != transaction["old_status"]:
-                set_status(status_path, transaction["old_status"])
+                self.set_artifact_status(status_ref, transaction["old_status"])
             raise WorkflowError("Committed tree or remaining files differ from verification; stop and inspect.")
-        if status_text(status_path) != transaction["new_status"]:
+        if self.artifact_status(status_ref) != transaction["new_status"]:
             raise WorkflowError("Status edit is missing from the commit.")
         if transaction["kind"] == "ticket":
             record = self.data["tickets"][self.data["current"]]
@@ -720,12 +788,16 @@ class Run:
                 "review_base": record.get("review_base"), "cycle": record.get("repair_cycle"),
             })
             self.data.update(head=current_head, current=None, phase="ready")
+            if not self.uses_local_tracker():
+                self.queue_publication(transaction["path"], current_head)
             self.data.pop("transaction")
             self.data.pop("blocker", None)
             self.save()
         else:
             if transaction["kind"] == "audit":
                 self.data["audits"][-1]["commit"] = current_head
+                if transaction["target_phase"] == "publishing":
+                    self.queue_publication(self.spec, current_head)
             elif transaction["kind"] == "repair-plan":
                 self.data["audit_cycles"][-1]["rounds"][-1]["commit"] = current_head
             self.data.update(head=current_head, phase=transaction["target_phase"])
@@ -738,6 +810,7 @@ class Run:
     def finish(self, report):
         self.ensure({"ready"}, checkpoint=True)
         self.require_outer()
+        self.require_publication()
         if any(not item["commit"] for item in self.data["tickets"].values()):
             raise WorkflowError("Required tickets remain unfinished.")
         if report.get("audited_commit") != self.data["head"] or report.get("baseline_commit") != self.data["baseline"]:
@@ -750,7 +823,7 @@ class Run:
         if verdict == "PASS":
             criteria = self.data["plan"].get("requirements", [])
             if not criteria:
-                raise WorkflowError("The plan needs PRD requirements before final approval.")
+                raise WorkflowError("The plan needs specification requirements before final approval.")
             normalized = dict(report, ticket=self.spec, criteria=report.get("requirements", []))
             validate_pass(normalized, {"path": self.spec, "criteria": criteria},
                           self.data["plan"]["checks"], self.data["checkpoint"])
@@ -767,11 +840,15 @@ class Run:
             raise WorkflowError("Uncommitted implementation changes prevent the final audit commit.")
         number = len(self.data["audits"]) + 1
         filename = "final-audit.md" if number == 1 else f"final-audit-{number:03d}.md"
-        audit = (Path(self.spec).parent / filename).as_posix()
+        if self.data.get("version", 2) >= 3:
+            filename = f"audit-{number:03d}.json"
+            audit = (Path(self.record).parent / filename).as_posix()
+        else:
+            audit = (Path(self.spec).parent / filename).as_posix()
         audit_path = relative_file(self.repo, audit)
         if audit_path.exists():
             raise WorkflowError("An audit report already exists; preserve it and resolve the destination.")
-        previous = status_text(relative_file(self.repo, self.spec))
+        previous = self.artifact_status(self.spec)
         cycle = self.data["audit_cycles"][-1]
         self.data["audits"].append({
             "number": number, "report": copy.deepcopy(report), "path": audit,
@@ -785,12 +862,37 @@ class Run:
             "kind": "audit", "path": self.spec, "old_status": previous,
             "new_status": self.data["plan"].get("finished_spec", "done") if verdict == "PASS" else previous,
             "parent": self.data["head"], "message": f"Record implementation audit for {Path(self.spec).stem}",
-            "paths": [audit, self.record, self.spec],
+            "paths": [audit, self.record, *([self.spec] if self.uses_local_tracker() else [])],
             "before_status_snapshot": snapshot(self.repo, [self.record, audit], include_index=False),
-            "status_restored": True, "target_phase": "done" if verdict == "PASS" else "audit-blocked",
+            "status_restored": True,
+            "target_phase": ("done" if self.uses_local_tracker() else "publishing") if verdict == "PASS" else "audit-blocked",
             "audit_path": audit,
         }
         self.data.update(phase="committing", transaction=transaction, audit=report)
+        self.save()
+        return self.reconcile_commit()
+
+    def published(self, report):
+        self.ensure({"ready", "publishing"}, checkpoint=True)
+        if self.data["phase"] == "publishing":
+            self.require_outer()
+        pending = self.data.get("pending_publication")
+        if (not pending or not report or report.get("ref") != pending["ref"]
+                or report.get("marker") != pending["marker"] or report.get("commit") != pending["commit"]
+                or report.get("previous_workers_inactive") is not True
+                or not report.get("receipt") or not report.get("observed_state") or not report.get("evidence")):
+            raise WorkflowError("Publication needs the pending reference, marker, commit and read-back evidence.")
+        self.data.setdefault("publications", []).append(copy.deepcopy(report))
+        self.data.pop("pending_publication")
+        previous = self.artifact_status(self.spec)
+        phase = "done" if self.data["phase"] == "publishing" else "ready"
+        self.data.update(phase="committing", transaction={
+            "kind": "publication", "path": self.spec, "old_status": previous, "new_status": previous,
+            "parent": self.data["head"], "message": "Record confirmed tracker publication",
+            "paths": [self.record], "status_restored": True,
+            "before_status_snapshot": snapshot(self.repo, [self.record], include_index=False),
+            "target_phase": phase,
+        })
         self.save()
         return self.reconcile_commit()
 
@@ -839,24 +941,30 @@ class Run:
             raise WorkflowError("Audit finding attempts exhausted; a new ticket cannot reset its allowance.")
         updated = copy.deepcopy(self.data)
         plan = updated["plan"]
-        known = {ticket["path"]: ticket for ticket in plan["tickets"]}
+        known = {ticket_reference(ticket): ticket for ticket in plan["tickets"]}
         edits = {}
+        seen = set()
         reserved = {self.spec, self.record, *(item["path"] for item in self.data["audits"])}
         for change in changes:
-            name = change["path"]
-            path = relative_file(self.repo, name)
-            if (name in reserved or name in edits
+            name = ticket_reference(change)
+            local = self.uses_local_tracker()
+            path = relative_file(self.repo, name) if local else None
+            if (name in reserved or name in seen
                     or not change.get("finding_ids") or not change.get("requirements")
                     or not set(change["requirements"]) <= set(plan["requirements"])):
-                raise WorkflowError("Repair tickets need distinct paths, audit findings and approved PRD requirements.")
+                raise WorkflowError("Repair tickets need distinct references, audit findings and approved specification requirements.")
+            seen.add(name)
+            if not local and not change.get("tracker_evidence"):
+                raise WorkflowError("Confirm repair ticket creation or reopening through the configured tracker.")
             if change.get("action") == "reopen":
                 if name not in known or not updated["tickets"][name]["commit"]:
                     raise WorkflowError("Only a completed ticket in this plan can be reopened.")
-                if status_text(path) != plan.get("finished_ticket", "closed"):
+                if self.artifact_status(name) != plan.get("finished_ticket", "closed"):
                     raise WorkflowError("Completed ticket status differs from the saved run.")
-                before = path.read_bytes().decode("utf-8")
-                after = re.sub(r"^Status: [^\r\n]+", lambda match: f"Status: {plan.get('ready_ticket', 'ready-for-agent')}",
-                               before, count=1, flags=re.MULTILINE)
+                if local:
+                    before = path.read_bytes().decode("utf-8")
+                    after = re.sub(r"^Status: [^\r\n]+", lambda match: f"Status: {plan.get('ready_ticket', 'ready-for-agent')}",
+                                   before, count=1, flags=re.MULTILINE)
                 record = updated["tickets"][name]
                 if not record.get("completions"):
                     record["completions"] = [{
@@ -866,7 +974,7 @@ class Run:
                 record["commit"] = None
                 record.pop("review_base", None)
             elif change.get("action") == "create":
-                if name in known or path.exists() or git(self.repo, "ls-files", "-z", "--", name):
+                if name in known or (local and (path.exists() or git(self.repo, "ls-files", "-z", "--", name))):
                     raise WorkflowError("New repair ticket would overwrite an existing file or planned ticket.")
                 criteria = change.get("criteria", [])
                 if (change.get("execution") != "AFK" or not criteria
@@ -875,16 +983,18 @@ class Run:
                         or change.get("kind", "behavior") not in {"behavior", "documentation"}
                         or (change.get("kind", "behavior") == "behavior" and not change.get("seams"))):
                     raise WorkflowError("New repair tickets need AFK criteria and approved testing boundaries.")
-                after = change.get("content", "")
-                if re.findall(r"^Status: ([^\r\n]*)\r?$", after, flags=re.MULTILINE) != [
+                after = change.get("content", "") if local else change.get("body", "")
+                if local and re.findall(r"^Status: ([^\r\n]*)\r?$", after, flags=re.MULTILINE) != [
                     plan.get("ready_ticket", "ready-for-agent"),
                 ]:
                     raise WorkflowError("New repair ticket content needs exactly one ready Status line.")
+                if not local and (not isinstance(after, str) or not after.strip() or not change.get("revision")):
+                    raise WorkflowError("Capture the created repair ticket's approved body and revision.")
                 if not set(change.get("related_tickets", [])) <= set(known):
                     raise WorkflowError("Related repair tickets must identify existing planned work.")
                 ticket = {key: copy.deepcopy(change[key]) for key in (
-                    "path", "execution", "kind", "criteria", "seams", "blocked_by",
-                    "requirements", "related_tickets",
+                    "path", "ref", "execution", "kind", "criteria", "seams", "blocked_by",
+                    "requirements", "related_tickets", "body", "revision", "discussion",
                 ) if key in change}
                 plan["tickets"].append(ticket)
                 known[name] = ticket
@@ -895,6 +1005,7 @@ class Run:
             else:
                 raise WorkflowError("Repair work must reopen a completed ticket or create a new one.")
             self.repair_allowance(record, cycle["number"])
+            record["status"] = plan.get("ready_ticket", "ready-for-agent")
             record["audit_findings"] = change["finding_ids"]
             if record["attempts"] >= record["attempt_limit"]:
                 self.data.update(budget_exhausted="ticket_attempts", requires_user_resolution=True)
@@ -902,15 +1013,16 @@ class Run:
                 raise WorkflowError("Ticket repair attempts exhausted in this allowance.")
             record["findings"] = [finding for finding in audit["report"]["blocking_findings"]
                                   if finding["id"] in change["finding_ids"]]
-            audit_link = Path(os.path.relpath(self.repo / audit["path"], path.parent)).as_posix()
-            newline = "\r\n" if "\r\n" in after else "\n"
-            after += (
-                f"\n## Audit repair {audit['number']}\n\n"
-                f"Audit: [{audit['path']}]({audit_link})\n"
-                f"Findings: {', '.join(change['finding_ids'])}\n"
-                f"Requirements: {', '.join(change['requirements'])}\n"
-            ).replace("\n", newline)
-            edits[name] = {"before": before, "after": after}
+            if local:
+                audit_link = Path(os.path.relpath(self.repo / audit["path"], path.parent)).as_posix()
+                newline = "\r\n" if "\r\n" in after else "\n"
+                after += (
+                    f"\n## Audit repair {audit['number']}\n\n"
+                    f"Audit: [{audit['path']}]({audit_link})\n"
+                    f"Findings: {', '.join(change['finding_ids'])}\n"
+                    f"Requirements: {', '.join(change['requirements'])}\n"
+                ).replace("\n", newline)
+                edits[name] = {"before": before, "after": after}
         validate_graph(plan["tickets"])
         changed = git_paths(self.repo, "diff", "--name-only", "HEAD")
         changed.update(git_paths(self.repo, "diff", "--cached", "--name-only", "HEAD"))
@@ -920,7 +1032,7 @@ class Run:
         updated["audit_cycles"][-1]["rounds"].append({
             "audit_number": audit["number"], "plan": copy.deepcopy(report), "commit": None,
         })
-        previous = status_text(relative_file(self.repo, self.spec))
+        previous = self.artifact_status(self.spec)
         updated.update(
             phase="committing", current=None, review=None, implementation=None,
             transaction={
@@ -1000,9 +1112,8 @@ class Run:
             record.setdefault("review_base", transaction["parent"])
             record.setdefault("unverified_commits", []).append(current_head)
             self.data["head"] = current_head
-        path = relative_file(self.repo, transaction["path"])
-        if status_text(path) == transaction["new_status"]:
-            set_status(path, transaction["old_status"])
+        if self.artifact_status(transaction["path"]) == transaction["new_status"]:
+            self.set_artifact_status(transaction["path"], transaction["old_status"])
         self.data.setdefault("invalidations", []).append(report)
         self.data.pop("transaction", None)
         self.data.update(phase="reviewing", review=None)
@@ -1125,7 +1236,7 @@ def require_entry_context(entry):
 
 
 def verify_checkout_entry(repo, spec):
-    spec = repository_path(spec)
+    spec = tracker_reference(spec)
     locked = False
     try:
         with exclusive(git_home(repo) / "launch.lock"):
@@ -1157,7 +1268,7 @@ def verify_checkout_entry(repo, spec):
 def launch(repo, spec, branch=None, resume=False):
     import entry
 
-    spec = repository_path(spec)
+    spec = tracker_reference(spec)
     verify_configuration()
     executable = platform_support.resolve_codex()
     with exclusive(git_home(repo) / "launch.lock"):
@@ -1218,7 +1329,7 @@ def main():
     parser.add_argument("action", choices=[
         "launch", "prepare", "init", "status", "snapshot", "begin", "implemented",
         "reviewed", "dispute", "adjudicate", "commit", "finish", "checkpoint",
-        "reconcile-commit", "resolve", "invalidate", "doctor", "repair-audit", "continue-audit",
+        "reconcile-commit", "resolve", "invalidate", "doctor", "repair-audit", "continue-audit", "published",
     ])
     parser.add_argument("spec", nargs="?")
     parser.add_argument("--repo", default=os.getcwd())
@@ -1235,7 +1346,7 @@ def main():
             return 0
         repo = Path(git(arguments.repo, "rev-parse", "--show-toplevel"))
         if not arguments.spec:
-            raise WorkflowError("Provide the repository-relative PRD path.")
+            raise WorkflowError("Provide the canonical specification reference.")
         if arguments.action == "launch":
             return launch(repo, arguments.spec, arguments.branch, arguments.resume)
         if arguments.action == "prepare":
@@ -1269,6 +1380,8 @@ def main():
                 print(run.commit_ticket())
             elif arguments.action == "finish":
                 print(run.finish(report))
+            elif arguments.action == "published":
+                print(run.published(report))
             elif arguments.action == "repair-audit":
                 print(run.repair_audit(report))
             elif arguments.action == "continue-audit":

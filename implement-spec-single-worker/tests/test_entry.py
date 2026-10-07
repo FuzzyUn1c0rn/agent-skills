@@ -193,7 +193,7 @@ class EntryTests(unittest.TestCase):
         workflow.choose_branch(self.repo, "PRD.md", "existing-feature")
         run = workflow.Run(self.repo, "PRD.md")
         run.create({
-            "spec": "PRD.md", "checks": [["suite"]], "requirements": ["US1"],
+            "spec": "PRD.md", "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "requirements": ["US1"],
             "approval_evidence": "Approved fixture",
             "tickets": [{"path": "ticket.md", "execution": "AFK", "criteria": ["AC1"], "seams": ["public"]}],
         })
@@ -334,7 +334,7 @@ class EntryTests(unittest.TestCase):
         authorized = self.guard_result(dict(self.env, CODEX_THREAD_ID="actual-coordinator"))
         self.assertIn("missing-plan.json", authorized.stderr)
         plan = self.root / "coordinator-init.json"
-        plan.write_text(json.dumps({"spec": "PRD.md"}))
+        plan.write_text(json.dumps({"spec": "PRD.md", "tracker": {"kind": "local-markdown"}}))
         rejected_init = subprocess.run(
             self.workflow_command + ["init", "PRD.md",
              "--repo", str(self.repo), "--plan", str(plan)],
@@ -383,7 +383,7 @@ class EntryTests(unittest.TestCase):
         with patch.dict(os.environ, {"CODEX_THREAD_ID": "selected-outer"}):
             run = workflow.Run(self.repo, "PRD.md")
             run.create({
-                "spec": "PRD.md", "checks": [["suite"]], "requirements": ["US1"],
+                "spec": "PRD.md", "tracker": {"kind": "local-markdown"}, "checks": [["suite"]], "requirements": ["US1"],
                 "approval_evidence": "Approved documentation",
                 "tickets": [{"path": "ticket.md", "execution": "AFK", "criteria": ["AC1"],
                              "kind": "documentation"}],

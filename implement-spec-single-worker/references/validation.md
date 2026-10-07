@@ -1,13 +1,16 @@
-# Portability validation
+# Validation history
+
+## Historical portability validation
 
 Recorded on 2026-10-07 for the portability changes. The passing hosted matrix
 tested integration revision `0d8e8b41eb51ce481638a52e43034cafab52fd3c` in
 [run 37621957481](https://github.com/FuzzyUn1c0rn/agent-skills/actions/runs/37621957481).
 The original local full-suite revision was
-`35764dc19513e5a542d4273d08516590578eea12`. Production scripts, requirements and
-the CI workflow remain identical to that revision; the later fixture-only
+`35764dc19513e5a542d4273d08516590578eea12`. For that validation, production scripts,
+requirements and the CI workflow were identical to that revision; the later fixture-only
 correction and its additional validation are recorded below. This evidence
-update changes documentation only.
+update changed documentation only. These historical results predate the
+tracker-independent source workflow; its validation is recorded separately below.
 
 From the repository root, install requirements and run the same complete suite
 used by [.github/workflows/helper-tests.yml](../../.github/workflows/helper-tests.yml):
@@ -78,3 +81,35 @@ blockers. The subsequent hosted matrix passed on both supported Python versions
 and both operating systems, as recorded above. The user authorized the push
 before hosted validation. The parent issue remains unmodified as required by
 ticket #7.
+
+## Tracker-independent artifact workflow
+
+Recorded on 2026-10-07 on `codex/tracker-independent-implementation`.
+Specifications, maps and tickets remain actual artifacts in the configured
+tracker. Helpers accept canonical references and keep JSON execution evidence;
+new plans must explicitly select a tracker. Local artifact conventions apply
+only to the selected local Markdown tracker.
+
+The complete suite passed in WSL Ubuntu 26.04 with Python 3.14.4 and Portalocker
+4.4.0: 134 tests in 175.836 seconds, zero skips. The command was
+`python3 -m unittest discover -s implement-spec-single-worker/tests -v`.
+`PYTHONPATH` selected the existing Portalocker package from the native Python
+installation; no runtime dependency or supported-version requirement changed.
+
+Eight new tracker-workflow tests also passed on native Windows with Python
+3.14.8 and Portalocker 4.4.0 in 208.782 seconds. After requiring explicit tracker
+selection, the missing-selection and coordinator-ownership cases passed again
+on Windows. The skill validator, TOML parsing, JSON examples, relative resource
+links and `git diff --check` passed.
+
+The new fixtures exercise GitHub/GitLab issue URLs and custom tracker IDs in
+code-only checkouts with no specification or ticket files. They cover entry,
+verification, local commits, pending publication, receipt validation and commit
+recovery, final audits, actual repair references and reopening without resetting
+attempt history. A separate explicitly selected local-tracker case checks real
+local artifact updates. Existing local fixtures now select that tracker rather
+than depending on an implicit file-based default.
+
+These tests simulate fetched artifacts and tracker read-back receipts. They do
+not call live tracker APIs, change real issues, start real workflow agents or
+demonstrate a new hosted CI run.
