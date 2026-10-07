@@ -17,7 +17,7 @@ import install
 import workflow
 import entry
 import platform_support
-from test_support import isolate_git
+from test_support import isolate_environment
 
 
 HELPER_TIMEOUT = 30
@@ -54,7 +54,7 @@ class EntryTests(unittest.TestCase):
         self.assertEqual(ownership, entry.entry_path(self.repo).read_bytes())
 
     def setUp(self):
-        isolate_git(self)
+        isolate_environment(self)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)

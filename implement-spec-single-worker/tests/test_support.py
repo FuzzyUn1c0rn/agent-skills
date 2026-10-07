@@ -1,16 +1,20 @@
-"""Temporary test environment; production helpers keep the user's Git behavior."""
+"""Disposable helper context; production keeps the user's Git and Codex settings."""
 
 import os
 import tempfile
 from unittest.mock import patch
 
 
-def isolate_git(test):
+def isolate_environment(test):
     template = tempfile.TemporaryDirectory(prefix="implement-spec-git-template-")
     test.addCleanup(template.cleanup)
     inherited = {
         "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR",
         "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_EXTERNAL_DIFF",
+        "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+        "IMPLEMENT_SPEC_LAUNCH", "IMPLEMENT_SPEC_LAUNCH_ID", "IMPLEMENT_SPEC_CODEX",
+        "CODEX_THREAD_ID", "CODEX_HOME",
     }
     environment = {
         name: value for name, value in os.environ.items()

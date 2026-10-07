@@ -14,12 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import configuration
 import install
 import workflow
-from test_support import isolate_git
+from test_support import isolate_environment
 
 
 class ConfigurationTests(unittest.TestCase):
     def setUp(self):
-        isolate_git(self)
+        isolate_environment(self)
 
     def test_role_expectations_use_one_settings_file(self):
         with tempfile.TemporaryDirectory() as directory:

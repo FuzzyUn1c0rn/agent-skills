@@ -7,12 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import workflow
-from test_support import isolate_git
+from test_support import isolate_environment
 
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
-        isolate_git(self)
+        isolate_environment(self)
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.repo = Path(self.directory.name)
