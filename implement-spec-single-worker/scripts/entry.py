@@ -24,6 +24,7 @@ def entry_path(repo):
 
 
 def owned_entry(repo, spec):
+    spec = workflow.repository_path(spec)
     path = entry_path(repo)
     if not path.exists():
         raise workflow.WorkflowError("No current-session checkout lock. Run entry.py start first.")
@@ -46,6 +47,7 @@ def require_inactive(report):
 
 
 def hold(repo, spec, branch=None, resume=False):
+    spec = workflow.repository_path(spec)
     workflow.verify_configuration()
     executable = platform_support.resolve_codex()
     owner = session_id()
@@ -144,6 +146,7 @@ def stop(repo, spec, report):
 
 
 def recover(repo, spec, report):
+    spec = workflow.repository_path(spec)
     require_inactive(report)
     with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
         entry = json.loads(entry_path(repo).read_text())
@@ -170,7 +173,9 @@ def main():
     try:
         repo = Path(workflow.git(arguments.repo, "rev-parse", "--show-toplevel"))
         spec_path = Path(arguments.spec)
-        spec = str(spec_path.resolve().relative_to(repo)) if spec_path.is_absolute() else arguments.spec
+        spec = workflow.repository_path(
+            spec_path.resolve().relative_to(repo).as_posix() if spec_path.is_absolute() else arguments.spec,
+        )
         report = json.loads(Path(arguments.report).read_text()) if arguments.report else None
         if arguments.action == "start":
             mode = arguments.session or configuration.load()["default_session"]
