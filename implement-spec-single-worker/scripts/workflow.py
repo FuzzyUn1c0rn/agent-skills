@@ -154,7 +154,7 @@ def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".workflow-")
     try:
-        with os.fdopen(descriptor, "w") as stream:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
             json.dump(value, stream, indent=2)
             stream.write("\n")
             stream.flush()
@@ -214,8 +214,8 @@ def relative_file(repo, name):
 
 
 def status_text(path):
-    matches = re.findall(r"^Status: (.+)$", path.read_text(), flags=re.MULTILINE)
-    if len(matches) != 1:
+    matches = re.findall(r"^Status: ([^\r\n]*)\r?$", path.read_bytes().decode("utf-8"), flags=re.MULTILINE)
+    if len(matches) != 1 or not matches[0]:
         raise WorkflowError(f"Expected one Status line in {path}")
     return matches[0]
 
@@ -224,8 +224,8 @@ def set_status(path, label):
     status_text(path)
     if not label or "\n" in label or "\r" in label:
         raise WorkflowError("Invalid tracker label.")
-    path.write_text(re.sub(r"^Status: .+$", lambda match: f"Status: {label}",
-                           path.read_text(), count=1, flags=re.MULTILINE))
+    path.write_bytes(re.sub(rb"^Status: [^\r\n]+", lambda match: f"Status: {label}".encode("utf-8"),
+                           path.read_bytes(), count=1, flags=re.MULTILINE))
 
 
 def validate_graph(tickets):
@@ -263,7 +263,7 @@ class Run:
         identity = hashlib.sha256((spec + "\0" + branch).encode()).hexdigest()[:20]
         self.path = git_home(self.repo) / "runs" / identity / "state.json"
         self.record = (Path(spec).parent / "implementation-run.json").as_posix()
-        self.data = json.loads(self.path.read_text()) if self.path.exists() else None
+        self.data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else None
         if self.data:
             self.data.setdefault("audit_cycles", [
                 audit_cycle(1, self.data["plan"]["approval_evidence"]),
@@ -287,7 +287,7 @@ class Run:
             raise WorkflowError("A run record already exists. Resume it instead of overwriting it.")
         entry_path = git_home(self.repo) / "entry.json"
         if entry_path.exists():
-            owner = json.loads(entry_path.read_text())["outer_session"]
+            owner = json.loads(entry_path.read_text(encoding="utf-8"))["outer_session"]
             if os.environ.get("CODEX_THREAD_ID") != owner:
                 raise WorkflowError("Only the admitted outer session may initialize a run.")
         elif os.environ.get("IMPLEMENT_SPEC_LAUNCH") == "1":
@@ -309,7 +309,7 @@ class Run:
             raise WorkflowError("Record the evidence for approved requirements and testing boundaries.")
         if not git(self.repo, "branch", "--show-current"):
             raise WorkflowError("Detached HEAD is not supported.")
-        relative_file(self.repo, self.spec).read_text()
+        relative_file(self.repo, self.spec).read_text(encoding="utf-8")
         tickets = plan.get("tickets", [])
         validate_graph(tickets)
         records = {}
@@ -364,10 +364,16 @@ class Run:
             if not audit.get("commit"):
                 continue
             path = relative_file(self.repo, audit["path"])
-            original = subprocess.check_output(
-                ["git", "-C", str(self.repo), "cat-file", "blob", f"{audit['commit']}:{audit['path']}"]
+            if not path.is_file():
+                raise WorkflowError(f"Historical audit report changed or disappeared: {audit['path']}")
+            canonical = subprocess.run(
+                ["git", "-C", str(self.repo), "hash-object", f"--path={audit['path']}", "--stdin"],
+                input=path.read_bytes(), capture_output=True, check=False,
             )
-            if not path.is_file() or path.read_bytes() != original:
+            if canonical.returncode:
+                raise WorkflowError(canonical.stderr.decode("utf-8", errors="replace").strip())
+            original = git(self.repo, "rev-parse", f"{audit['commit']}:{audit['path']}")
+            if canonical.stdout.decode("ascii").strip() != original:
                 raise WorkflowError(f"Historical audit report changed or disappeared: {audit['path']}")
 
     def ticket(self):
@@ -649,20 +655,20 @@ class Run:
                 raise WorkflowError("Pending commit files changed; preserve them and request fresh verification.")
             for name, edit in edits.items():
                 path = relative_file(self.repo, name)
-                current = path.read_text() if path.exists() else None
+                current = path.read_bytes().decode("utf-8") if path.exists() else None
                 if current not in (edit["before"], edit["after"]):
                     raise WorkflowError("Pending repair ticket changed; preserve it and investigate.")
             for name, edit in edits.items():
                 path = relative_file(self.repo, name)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(edit["after"])
+                path.write_bytes(edit["after"].encode("utf-8"))
             if transaction["kind"] == "audit":
                 audit_path = relative_file(self.repo, transaction["audit_path"])
                 content = "# Implementation audit\n\n```json\n" + json.dumps(self.data["audit"], indent=2) + "\n```\n"
-                if audit_path.exists() and audit_path.read_text() != content:
+                if audit_path.exists() and audit_path.read_bytes().decode("utf-8") != content:
                     raise WorkflowError("Pending audit report was changed; preserve it and investigate.")
                 if not audit_path.exists():
-                    audit_path.write_text(content)
+                    audit_path.write_bytes(content.encode("utf-8"))
             set_status(status_path, transaction["new_status"])
             transaction["status_restored"] = False
             transaction["working_snapshot"] = snapshot(self.repo, [self.record], include_index=False)
@@ -847,8 +853,8 @@ class Run:
                     raise WorkflowError("Only a completed ticket in this plan can be reopened.")
                 if status_text(path) != plan.get("finished_ticket", "closed"):
                     raise WorkflowError("Completed ticket status differs from the saved run.")
-                before = path.read_text()
-                after = re.sub(r"^Status: .+$", lambda match: f"Status: {plan.get('ready_ticket', 'ready-for-agent')}",
+                before = path.read_bytes().decode("utf-8")
+                after = re.sub(r"^Status: [^\r\n]+", lambda match: f"Status: {plan.get('ready_ticket', 'ready-for-agent')}",
                                before, count=1, flags=re.MULTILINE)
                 record = updated["tickets"][name]
                 if not record.get("completions"):
@@ -869,7 +875,7 @@ class Run:
                         or (change.get("kind", "behavior") == "behavior" and not change.get("seams"))):
                     raise WorkflowError("New repair tickets need AFK criteria and approved testing boundaries.")
                 after = change.get("content", "")
-                if re.findall(r"^Status: (.+)$", after, flags=re.MULTILINE) != [
+                if re.findall(r"^Status: ([^\r\n]*)\r?$", after, flags=re.MULTILINE) != [
                     plan.get("ready_ticket", "ready-for-agent"),
                 ]:
                     raise WorkflowError("New repair ticket content needs exactly one ready Status line.")
@@ -896,12 +902,13 @@ class Run:
             record["findings"] = [finding for finding in audit["report"]["blocking_findings"]
                                   if finding["id"] in change["finding_ids"]]
             audit_link = Path(os.path.relpath(self.repo / audit["path"], path.parent)).as_posix()
+            newline = "\r\n" if "\r\n" in after else "\n"
             after += (
                 f"\n## Audit repair {audit['number']}\n\n"
                 f"Audit: [{audit['path']}]({audit_link})\n"
                 f"Findings: {', '.join(change['finding_ids'])}\n"
                 f"Requirements: {', '.join(change['requirements'])}\n"
-            )
+            ).replace("\n", newline)
             edits[name] = {"before": before, "after": after}
         validate_graph(plan["tickets"])
         changed = git_paths(self.repo, "diff", "--name-only", "HEAD")
@@ -1049,7 +1056,7 @@ def verify_configuration():
     expected = configuration.expectations()
     for path in config_paths():
         role = "outer" if path.name.endswith(".config.toml") else path.stem
-        installed = tomllib.loads(path.read_text())
+        installed = tomllib.loads(path.read_text(encoding="utf-8"))
         if (installed.get("model"), installed.get("model_reasoning_effort")) != expected[role][:2]:
             raise WorkflowError("Installed profiles differ from settings.toml. Run scripts/install.py.")
 
@@ -1059,7 +1066,7 @@ def session_metadata(identifier):
         raise WorkflowError("Missing or invalid Codex session identifier.")
     home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "sessions"
     for path in home.rglob(f"*{identifier}.jsonl"):
-        with path.open() as stream:
+        with path.open(encoding="utf-8") as stream:
             event = json.loads(next(stream))
         if event.get("type") == "session_meta" and event["payload"].get("id") == identifier:
             return event["payload"]
@@ -1079,13 +1086,14 @@ def validate_coordinator(identifier, entry):
 
 def runtime_version(executable=None):
     executable = executable if executable is not None else platform_support.resolve_codex()
-    result = subprocess.run([str(executable), "--version"], check=True, capture_output=True, text=True)
+    result = subprocess.run([str(executable), "--version"], check=True, capture_output=True,
+                            text=True, encoding="utf-8")
     return result.stdout.strip()
 
 
 def enforced_config_arguments(include_outer_model=True):
     verify_configuration()
-    config = tomllib.loads(config_paths()[0].read_text())
+    config = tomllib.loads(config_paths()[0].read_text(encoding="utf-8"))
     values = {
         "agents.max_depth": config["agents"]["max_depth"],
     }
@@ -1120,7 +1128,7 @@ def verify_checkout_entry(repo, spec):
         raise WorkflowError("No active checkout lock. Start the workflow entry before changing run state.")
     path = git_home(repo) / "entry.json"
     if path.exists():
-        entry = json.loads(path.read_text())
+        entry = json.loads(path.read_text(encoding="utf-8"))
         if (entry.get("phase") != "admitted" or entry.get("release")
                 or entry.get("spec") != spec
                 or entry.get("branch") != git(repo, "branch", "--show-current")
@@ -1217,9 +1225,9 @@ def main():
         verify_checkout_entry(repo, arguments.spec)
         with exclusive(git_home(repo) / "state.lock"):
             run = Run(repo, arguments.spec)
-            report = json.loads(Path(arguments.report).read_text()) if arguments.report else None
+            report = json.loads(Path(arguments.report).read_text(encoding="utf-8")) if arguments.report else None
             if arguments.action == "init":
-                run.create(json.loads(Path(arguments.plan).read_text()))
+                run.create(json.loads(Path(arguments.plan).read_text(encoding="utf-8")))
             elif arguments.action == "begin":
                 run.begin(arguments.ticket)
             elif arguments.action == "implemented":

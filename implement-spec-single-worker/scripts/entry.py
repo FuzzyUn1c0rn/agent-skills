@@ -28,7 +28,7 @@ def owned_entry(repo, spec):
     path = entry_path(repo)
     if not path.exists():
         raise workflow.WorkflowError("No current-session checkout lock. Run entry.py start first.")
-    entry = json.loads(path.read_text())
+    entry = json.loads(path.read_text(encoding="utf-8"))
     if entry["outer_session"] != session_id() or entry["spec"] != spec:
         raise workflow.WorkflowError("This checkout entry belongs to a different outer session or PRD.")
     if entry.get("release"):
@@ -65,7 +65,7 @@ def hold(repo, spec, branch=None, resume=False):
         workflow.write_json(entry_path(repo), entry)
         print(json.dumps(entry), flush=True)
         while True:
-            current = json.loads(entry_path(repo).read_text())
+            current = json.loads(entry_path(repo).read_text(encoding="utf-8"))
             if current.get("release"):
                 entry_path(repo).unlink()
                 return 0
@@ -103,7 +103,7 @@ def admit(repo, spec, report=None):
             selected = workflow.choose_branch(repo, spec, entry["requested_branch"])
             if workflow.Run(repo, spec).data:
                 raise workflow.WorkflowError("Run already exists on this branch. Stop, then start with --resume.")
-        workflow.relative_file(repo, spec).read_text()
+        workflow.relative_file(repo, spec).read_text(encoding="utf-8")
         entry.update(phase="admitted", admitted_at=time.time(), branch=selected)
         workflow.write_json(entry_path(repo), entry)
         return entry
@@ -149,7 +149,7 @@ def recover(repo, spec, report):
     spec = workflow.repository_path(spec)
     require_inactive(report)
     with workflow.exclusive(workflow.git_home(repo) / "launch.lock"):
-        entry = json.loads(entry_path(repo).read_text())
+        entry = json.loads(entry_path(repo).read_text(encoding="utf-8"))
         if entry["spec"] != spec or report.get("previous_outer_session") != entry["outer_session"]:
             raise workflow.WorkflowError("Recovery must identify the interrupted PRD and outer session.")
         workflow.write_json(workflow.git_home(repo) / "entry-recovery.json",
@@ -176,7 +176,7 @@ def main():
         spec = workflow.repository_path(
             spec_path.resolve().relative_to(repo).as_posix() if spec_path.is_absolute() else arguments.spec,
         )
-        report = json.loads(Path(arguments.report).read_text()) if arguments.report else None
+        report = json.loads(Path(arguments.report).read_text(encoding="utf-8")) if arguments.report else None
         if arguments.action == "start":
             mode = arguments.session or configuration.load()["default_session"]
             if mode == "new":
