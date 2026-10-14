@@ -1,0 +1,7 @@
+interface:
+  display_name: "AppSec Save Ticket"
+  short_description: "Transcribe a Jira ticket and its linked duplicates for offline AppSec work"
+  default_prompt: "Use $appsec-save-ticket to transcribe the current Jira issue VM-1234 for offline work."
+
+policy:
+  allow_implicit_invocation: false

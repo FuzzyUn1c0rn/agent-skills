@@ -1,0 +1,7 @@
+interface:
+  display_name: "Burp Suite"
+  short_description: "Use Burp's local MCP endpoint on demand"
+  default_prompt: "Use $burp-suite to inspect the locally running Burp Suite instance."
+
+policy:
+  allow_implicit_invocation: false

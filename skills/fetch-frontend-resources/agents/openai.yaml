@@ -1,0 +1,3 @@
+interface:
+  display_name: "Fetch Frontend Resources"
+  short_description: "Snapshot app JavaScript and referenced JSON assets"
