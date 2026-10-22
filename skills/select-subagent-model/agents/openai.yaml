@@ -1,0 +1,5 @@
+interface:
+  display_name: "Select Subagent Model"
+  short_description: "Choose subagent models using official guidance"
+policy:
+  allow_implicit_invocation: true
