@@ -13,6 +13,8 @@ For this user, prioritize accuracy over speed. Among configurations expected to 
 
 Choose model and effort together for the work, uncertainty, and consequences of missed errors. A stronger model at moderate effort can be appropriate. Favor enough capability initially to avoid foreseeable rework; keep bounded, easily verified tasks economical.
 
+For this user, default to `high` effort whenever Terra is selected, including simple tasks. Lower Terra's effort only for an explicit task-specific preference or hard budget. This is the user's accuracy preference; it does not establish that `high` always outperforms `medium`.
+
 ## Choose a model
 
 Official guidance checked on 2026-10-27:
@@ -20,7 +22,7 @@ Official guidance checked on 2026-10-27:
 | Model | Documented fit | Starting effort |
 | --- | --- | --- |
 | GPT-6 Luna (`gpt-6-luna`) | Clear, repeatable, high-volume work; focused exploration and diagnosed small fixes appear in Codex examples | `high` is the Codex subagent starting recommendation |
-| GPT-6.1 Terra (`gpt-6.1-terra`) | Scoped code fixes, visual reasoning, computer use with a defined outcome, concise writing from supplied material | `medium` is the GPT-6 guide's general baseline; adjust to the task below |
+| GPT-6.1 Terra (`gpt-6.1-terra`) | Scoped code fixes, visual reasoning, computer use with a defined outcome, concise writing from supplied material | `high` for this user; OpenAI recommends starting at `medium` and increasing when quality gains justify added time and tokens (rechecked 2026-11-05) |
 | GPT-6.1 Sol (`gpt-6.1-sol`) | Ambiguous work needing planning, tool use, validation, and sustained context; the Codex starting choice for most tasks | Client default; API default is `medium` |
 | GPT-6 Astra (`gpt-6-astra`) | The most demanding reasoning, coding, research, and complete workflows | `low` is the Codex explicit-model starting recommendation; adjust for difficulty |
 
@@ -34,9 +36,9 @@ The following choices apply OpenAI's guidance to this user's priorities. They ar
 | --- | --- |
 | Mechanical edits, extraction, or a fixed checklist with readily verified outcomes | Luna; `low` or `medium` can suffice for simple operations; retain `high` when tracing or judgment is needed |
 | Focused code mapping, documentation lookup, or repeatable fixes with a clear diagnosis | Luna/`high`; prefer Sol if gathering evidence becomes an ambiguous investigation |
-| Scoped code fix or bounded implementation following an established pattern | Terra/`medium` for clear local logic; Terra/`high` when invariants, edge cases, or test design require substantive reasoning |
+| Scoped code fix or bounded implementation following an established pattern | Terra/`high`, including clear local logic |
 | Multi-step implementation, uncertain diagnosis, changes across modules or shared state | Sol/`high`; `medium` can suit bounded work with a settled design; `xhigh` for especially difficult interacting constraints |
-| Simple UI inspection, a known correction, or a defined screen workflow | Terra/`medium` with explicit criteria and direct verification |
+| Simple UI inspection, a known correction, or a clearly defined desktop or browser workflow | Prefer Terra/`high` with explicit criteria and direct verification |
 | Subtle visual comparisons, consistency across UI states, interaction edge cases, corrective feedback | Terra/`high`; consider `xhigh` only for unusually demanding comparisons supported by sufficient evidence |
 | Code correctness review, meaningful regression-test design, or validation that must challenge assumptions | Sol/`high` when cross-cutting reasoning dominates; Luna/`high` or Terra/`high` can cover a bounded review matching their strengths |
 | Exceptionally difficult reasoning, correctness analysis, architecture, or failure modes with costly consequences | Astra; `medium` can suit bounded judgment-heavy work, `high` for complex logic and edge cases, `xhigh` or `max` for the hardest reasoning |
@@ -49,13 +51,13 @@ Terra is a coding candidate for suitable tasks without images. OpenAI specifical
 
 Use only levels supported by the selected model in the current delegation tool. API defaults and supported levels can differ from Codex or ChatGPT clients. Effort labels do not establish equal capability, accuracy, time, or cost across models.
 
-Adjust the model baselines using the task table. Choose higher effort initially when the task needs substantial assumption checking or edge-case reasoning; failing at a lower level is not a prerequisite. Lower effort can fit straightforward, directly checkable work. In particular, Astra's `low` baseline does not prescribe low effort for demanding correctness work. A short prompt alone does not justify lowering effort, and maximum effort on a cheaper model is not an established substitute for a more capable model.
+Adjust the model baselines using the task table and the user's Terra/`high` default. Choose higher effort initially when the task needs substantial assumption checking or edge-case reasoning; failing at a lower level is not a prerequisite. Lower effort can fit straightforward, directly checkable work, subject to explicit user preferences. In particular, Astra's `low` baseline does not prescribe low effort for demanding correctness work. A short prompt alone does not justify lowering effort, and maximum effort on a cheaper model is not an established substitute for a more capable model.
 
 Higher effort can improve quality but does not guarantee it. Reserve `xhigh` or `max` for especially demanding reasoning. Use `none` or `minimal` only when supported and suitable for a simple operation. Use `ultra` only when supported, respecting delegation rules and added usage. Extra reasoning cannot replace missing evidence or tools.
 
-## Use Terra for UI validation
+## Prefer Terra for visual verification and defined desktop workflows
 
-Actively consider Terra for an independent agent that inspects a developing UI, reports evidence to an implementer, and rechecks corrections. Use the task table for model and effort selection. This applies Terra's documented strengths; it is not a benchmark ranking.
+Prefer Terra/`high` for delegated visual verification and clearly defined desktop or browser workflows. This includes an independent agent that inspects a developing UI, reports evidence to an implementer, and rechecks corrections. Use the task table for unusually demanding comparisons. This selection reflects the user's preference and applies Terra's documented strengths; it is not a benchmark ranking. Choose another model when Terra lacks the required tools or when unresolved requirements and broader reasoning dominate the assignment.
 
 Supply the accepted design or reference, acceptance criteria, relevant UI states, and screenshots or application access. Require expected versus observed behavior, location or reproduction steps, and supporting evidence. Distinguish requirement violations from design suggestions. Screenshots establish appearance; interaction claims require exercising the application. Follow project presentation and sampling procedures. Use Sol or Astra when unresolved requirements or difficult reasoning across state and architecture dominate the review.
 
@@ -74,6 +76,8 @@ Supply acceptance criteria and raw artifacts for independent assessment. Require
 - Define the quality bar before comparing settings. For implementation, assess behavior, regressions, and repairs; for validation, assess missed defects, unsupported findings, and evidence quality. Use observed results rather than duplicate evaluation runs for every assignment. For representative comparisons, hold inputs, tools, criteria, and effort constant while comparing models; then vary effort. Reduce cost only while preserving the required accuracy. Explain selections briefly and distinguish source guidance from task-specific judgment.
 
 ## Sources and freshness
+
+Terra-specific guidance rechecked on 2026-11-05 against the model-selection guide, GPT-6 guide, Terra model page, and Codex subagent guide below. OpenAI supports `high` for Terra, but recommends `medium` as its starting point. This skill's Terra/`high` default is the user's accuracy preference; the documentation does not establish a quality gain for every task. The Codex subagent guide continues to give model starting recommendations for Sol and Luna without a separate Terra prescription.
 
 - [Codex subagent guide](https://learn.chatgpt.com/docs/agent-configuration/subagents#choosing-models-and-reasoning): delegation, model starting points, effort, and examples.
 - [Model-selection guide](https://developers.openai.com/api/docs/guides/model-selection): Terra's scoped coding role and quality, cost, and latency comparisons.
