@@ -1,0 +1,7 @@
+interface:
+  display_name: "AppSec PoC Report"
+  short_description: "Document a saved security PoC with inline evidence"
+  default_prompt: "Use $appsec-poc-report to write a shareable Markdown report from this ticket's saved PoC evidence."
+
+policy:
+  allow_implicit_invocation: false

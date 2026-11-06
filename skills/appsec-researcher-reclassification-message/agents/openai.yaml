@@ -1,0 +1,7 @@
+interface:
+  display_name: "AppSec Researcher Reclassification Message"
+  short_description: "Explain severity changes to security researchers"
+  default_prompt: "Use $appsec-researcher-reclassification-message to write a factual researcher-facing explanation for the supplied severity reclassification."
+
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+interface:
+  display_name: "AppSec Engineering Context Request"
+  short_description: "Create targeted Slack questions for engineering"
+  default_prompt: "Use $appsec-engineering-severity-request to create short, recipient-specific Slack messages for the supplied vulnerability ticket."
+
+policy:
+  allow_implicit_invocation: false
