@@ -13,8 +13,8 @@ Create three separate Codex chats through the app's thread tools. The primary wo
 
 | Role | Model | Reasoning effort | Responsibility |
 | --- | --- | --- | --- |
-| Implementer | `gpt-6.1-sol` | `medium` | Implement the entire specification one milestone at a time; write tests; commit and push work and repairs. |
-| Adversarial code reviewer | `gpt-6.1-sol` | `high` | Independently inspect the exact milestone commit for defects, regressions, missing requirements, and weak tests. |
+| Implementer | `gpt-6.2-sol` | `medium` | Implement the entire specification one milestone at a time; write tests; commit and push work and repairs. |
+| Adversarial code reviewer | `gpt-6.2-sol` | `high` | Independently inspect the exact milestone commit for defects, regressions, missing requirements, and weak tests. |
 | Adversarial end-to-end verifier | `gpt-6.1-terra` | `high` | Independently exercise all applicable end-to-end behavior, including UI, API, CLI, transports, and complete system workflows. |
 
 These are this workflow's defaults. Honor later explicit user overrides. Check actual model/effort support; do not silently substitute when a requested setting is unavailable.
